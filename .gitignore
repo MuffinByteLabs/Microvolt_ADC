@@ -1,0 +1,9 @@
+# Generated firmware output and temporary build files
+firmware/builds/
+firmware/.build/
+
+# Local Python and editor files
+__pycache__/
+*.pyc
+.vscode/
+.idea/
