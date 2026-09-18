@@ -1,6 +1,6 @@
 /*
   =====================================================================
-   MILLIVOLT MEASUREMENT AND ALARM SYSTEM                      v1.1
+   MILLIVOLT MEASUREMENT AND ALARM SYSTEM                      v1.2
    Arduino UNO R3  +  ADS1256 24-bit ADC  +  microSD logging
   =====================================================================
 
@@ -8,21 +8,33 @@
    ------------------------------
    The loop-stick antenna produces a tiny DC voltage (thousandths of a
    volt = millivolts).  This sketch reads that voltage with a very
-   precise 24-bit converter (the ADS1256), and runs the workflow the
+   precise 24-bit converter (the ADS1256) and runs the workflow the
    client described:
 
      Button 1  ->  start recording "air" readings every 0.5 s
                    (green LED flashes while recording)
      Button 2  ->  stop; average them -> this is the BASELINE
                    (green LED solid = ready)
-     Button 3  ->  start SCANNING: read every 0.5 s, compare to baseline,
-                   if the change is bigger than the threshold set by the
-                   knob -> red LED + buzzer
+     Button 3  ->  start SCANNING: read every 0.5 s, compare to the
+                   baseline; if the reading is outside
+                   baseline +/- ALARM_PERCENT  ->  red LED + buzzer
      Button 4  ->  stop scanning (baseline is kept for the next scan)
 
-   Every reading is printed to the Serial Monitor (115200 baud) and
-   written to a CSV file on the microSD card (LOG_0001.CSV, LOG_0002.CSV,
-   ... a new file every time the unit is switched on).
+   Alarm rule (confirmed by the client, 16 Sep 2026):
+     "The trigger threshold should always be the baseline plus / minus 10 %"
+     -> alarm when  reading > baseline + 10 %   or   reading < baseline - 10 %
+
+   Logging:
+     Every reading is printed to the Serial Monitor (115200 baud).
+     With a microSD card fitted, EVERY BASELINE RECORDING and EVERY SCAN
+     gets its own CSV file with its own ID:
+        BASE0001.CSV, BASE0002.CSV, ...   baseline (air) readings
+        SCAN0001.CSV, SCAN0002.CSV, ...   soil-scan readings
+     Each SCAN file starts with a summary block (file ID, baseline file,
+     baseline value, alarm %, low/high limits) followed by one row per
+     point: point number, reading, baseline, delta, limits, alarm flag.
+     In Excel: select the reading / baseline / limit columns and insert a
+     line chart -> the same graph as the client's own spreadsheet.
 
    You can also drive it from the Serial Monitor: type 1 2 3 4 to press
    the buttons, s for status, ? for help.
@@ -34,7 +46,7 @@
      baseline set .... two beeps
      scan started .... one long beep
      scan stopped .... two falling notes
-     ALARM ........... beep-beep-beep while the reading is outside the threshold
+     ALARM ........... beep-beep-beep while the reading is outside the limits
      error ........... fast beeps with the red LED flashing
 
    Wiring summary (full details in the wiring guide)
@@ -53,12 +65,15 @@
      D12 (MISO)    <-  ADS1256 DOUT   and  SD breakout DO
      D13 (SCK)     ->  ADS1256 SCLK   and  SD breakout CLK
      A0            <-  Potentiometer middle pin (ends to 5V and GND)
+                       (only used when KNOB_ENABLED is 1 - see SETTINGS)
      A1            ->  SD breakout CS
      A2            ->  ADS1256 PDWN  (also labelled SYNC on some boards)
      A3            ->  ADS1256 RST   (if the module has this pin; else leave unconnected)
      5V / GND      ->  ADS1256 5V/GND, SD breakout 5V/GND, buttons, pot, LEDs
 
-     Antenna:  SMA centre pin -> 1 k ohm -> ADS1256 AIN0
+     Antenna (the client's antenna has an SMA FEMALE jack, so the unit
+     ends in an SMA MALE plug on a short lead):
+               SMA centre pin -> 1 k ohm -> ADS1256 AIN0
                SMA shell      -> 1 k ohm -> ADS1256 AIN1
                10 nF capacitor between AIN0 and AIN1 (at the ADC)
                SMA shell also -> "2.5 V bias point" (two 10 k resistors
@@ -79,12 +94,35 @@
 // =====================================================================
 
 // Set to 1 to run WITHOUT the ADS1256 connected.  The sketch then makes
-// up a realistic antenna reading (about 0.070 mV with noise and slow
+// up a realistic antenna reading (about 0.072 mV with noise and slow
 // drift, like the client's own data) so you can test the buttons, LEDs,
-// buzzer, knob and SD card.  While SCANNING in test mode you can fake a
+// buzzer and SD card.  While SCANNING in test mode you can fake a
 // "buried object" by HOLDING BUTTON 2, or by typing  a  in the Serial
-// Monitor (toggles it on/off).  Set back to 0 for the real device.
+// Monitor (toggles it on/off).  Set to 0 for the real device.
 #define TEST_MODE 1
+
+// ---- Alarm rule ---------------------------------------------------
+// Alarm when the reading is outside  baseline +/- ALARM_PERCENT.
+// The client's instruction: "always the baseline plus / minus 10 %".
+const float ALARM_PERCENT = 10.0;
+
+// true  = alarm when the reading moves away from the baseline in EITHER
+//         direction (client: "readings can either go up or down").
+// false = alarm only when the reading goes ABOVE baseline + ALARM_PERCENT.
+const bool ALARM_BOTH_DIRECTIONS = true;
+
+// Safety floor for the alarm band, in mV.  If the baseline happens to be
+// ~0 (for example inputs shorted on the bench) 10 % of it would be 0 and
+// every sample would alarm.  0.001 mV = 1 microvolt.
+const float MIN_THRESHOLD_MV = 0.001;
+
+// ---- Threshold knob (potentiometer on A0) --------------------------
+// 0 = the knob is ignored; the alarm percentage is always ALARM_PERCENT.
+//     (This is what the client asked for.)
+// 1 = the knob selects the percentage: left / middle / right position
+//     -> KNOB_PERCENT[0] / [1] / [2].
+#define KNOB_ENABLED 0
+const float KNOB_PERCENT[3] = {5.0, 10.0, 20.0};
 
 // ---- Buzzer -------------------------------------------------------
 // BUZZER_PASSIVE: 1 = passive buzzer or passive buzzer MODULE (needs a
@@ -104,26 +142,6 @@ const unsigned int ALARM_BEEP_PERIOD_MS = 300;
 // ---- Sampling -----------------------------------------------------
 // How often a reading is taken and logged (client asked for 0.5 s).
 const unsigned long SAMPLE_INTERVAL_MS = 500;
-
-// ---- Alarm rule ---------------------------------------------------
-// The knob has three positions (left / middle / right).
-// Alarm when:   |reading - baseline|  >=  KNOB_FACTOR[position] * |baseline|
-//
-//   Client's design document:  1x, 2x, 3x of the baseline   -> {1.0, 2.0, 3.0}
-//   Client's spreadsheet:      baseline + 10 %               -> {0.10, 0.20, 0.30}
-//
-// Change the three numbers below once the client confirms which he wants.
-const float KNOB_FACTOR[3] = {1.0, 2.0, 3.0};
-
-// true  = alarm when the reading moves away from the baseline in EITHER
-//         direction (this is what the design document says: |delta|).
-// false = alarm only when the reading goes ABOVE the baseline.
-const bool ALARM_BOTH_DIRECTIONS = true;
-
-// Safety floor for the threshold, in mV.  If the baseline happens to be
-// ~0 (for example inputs shorted on the bench) the threshold would be 0
-// and every sample would alarm.  0.001 mV = 1 microvolt.
-const float MIN_THRESHOLD_MV = 0.001;
 
 // ---- Indicators ---------------------------------------------------
 // Flash the green LED while the baseline is being recorded (solid = ready).
@@ -359,7 +377,9 @@ bool buttonWasPressed(Button &b) {
 
 // =====================================================================
 //  KNOB (potentiometer) -> position 0, 1 or 2   with a little hysteresis
+//  Only compiled in when KNOB_ENABLED is 1.
 // =====================================================================
+#if KNOB_ENABLED
 uint8_t knobPosition = 0;
 
 uint8_t readKnobPosition() {
@@ -372,26 +392,15 @@ uint8_t readKnobPosition() {
   if (candidate < knobPosition && v <  (int)knobPosition * 341 - HYST)       knobPosition = candidate;
   return knobPosition;
 }
+#endif
 
-// =====================================================================
-//  SD CARD LOGGING
-// =====================================================================
-File logFile;
-bool sdReady = false;
-char logFileName[13] = "LOG_0001.CSV";
-
-bool sdStart() {
-  if (!SD.begin(PIN_SD_CS)) return false;
-  // find the first file name that does not exist yet
-  for (unsigned int n = 1; n <= 9999; n++) {
-    snprintf(logFileName, sizeof(logFileName), "LOG_%04u.CSV", n);
-    if (!SD.exists(logFileName)) break;
-  }
-  logFile = SD.open(logFileName, FILE_WRITE);
-  if (!logFile) return false;
-  logFile.println(F("time_s,phase,sample,reading_mV,baseline_mV,delta_mV,knob_pos,knob_factor,threshold_mV,alarm"));
-  logFile.flush();
-  return true;
+// The alarm percentage in use right now
+float currentAlarmPercent() {
+#if KNOB_ENABLED
+  return KNOB_PERCENT[knobPosition];
+#else
+  return ALARM_PERCENT;
+#endif
 }
 
 // =====================================================================
@@ -402,8 +411,8 @@ Phase phase = IDLE;
 bool  baselineValid   = false;
 float baselineMv      = 0.0;
 double baselineSum    = 0.0;      // running sum during air recording
-unsigned long sampleNumber = 0;   // counts samples in the current phase
-unsigned long lastScanTotal = 0;  // samples in the most recent scan
+unsigned long sampleNumber = 0;   // point number in the current phase
+unsigned long baselinePoints = 0; // how many readings went into the baseline
 
 // Readings from the ADC are collected continuously (10 per second) and
 // averaged into one value every SAMPLE_INTERVAL_MS.
@@ -414,12 +423,85 @@ unsigned long lastIdlePrintMs = 0;
 bool adcOk = false;
 float lastReadingMv = 0.0;
 
-bool alarmActive = false;         // true while the last scan sample was outside the threshold
+bool alarmActive = false;         // true while the last scan sample was outside the limits
 #if TEST_MODE
 bool simulatedAnomaly = false;    // toggled with 'a' in the Serial Monitor
 #endif
 
-// ---------------------------------------------------------------------
+// Alarm band for the current baseline and percentage
+void alarmLimits(float percent, float &thr, float &low, float &high) {
+  thr = (percent / 100.0) * fabs(baselineMv);
+  if (thr < MIN_THRESHOLD_MV) thr = MIN_THRESHOLD_MV;
+  low  = baselineMv - thr;
+  high = baselineMv + thr;
+}
+
+// =====================================================================
+//  SD CARD LOGGING  -  one file per baseline recording, one per scan
+// =====================================================================
+File logFile;
+bool sdReady = false;
+bool logOpen = false;
+char logFileName[13]      = "";           // file currently being written
+char baselineFileName[13] = "";           // BASExxxx.CSV the current baseline came from
+
+// Try to start the SD card (also used to retry later if no card at power-up)
+bool sdStart() {
+  if (sdReady) return true;
+  sdReady = SD.begin(PIN_SD_CS);
+  return sdReady;
+}
+
+// Open a new file  PREFIX0001.CSV, PREFIX0002.CSV ...  (prefix = 4 letters)
+bool logOpenNew(const char *prefix) {
+  if (!sdStart()) return false;
+  for (unsigned int n = 1; n <= 9999; n++) {
+    snprintf(logFileName, sizeof(logFileName), "%s%04u.CSV", prefix, n);
+    if (!SD.exists(logFileName)) break;
+  }
+  logFile = SD.open(logFileName, FILE_WRITE);
+  logOpen = (bool)logFile;
+  if (!logOpen) logFileName[0] = 0;
+  return logOpen;
+}
+
+void logClose() {
+  if (logOpen) { logFile.flush(); logFile.close(); logOpen = false; }
+}
+
+// Summary block at the top of a SCAN file (mirrors the layout of the
+// client's own meter, which also puts a summary before the data rows)
+void logScanHeader() {
+  if (!logOpen) return;
+  float thr, low, high;
+  alarmLimits(currentAlarmPercent(), thr, low, high);
+  logFile.print(F("file,"));           logFile.println(logFileName);
+  logFile.println(F("type,soil scan"));
+  logFile.print(F("baseline_file,"));  logFile.println(baselineFileName[0] ? baselineFileName : "(no SD card during baseline)");
+  logFile.print(F("baseline_points,")); logFile.println(baselinePoints);
+  logFile.print(F("baseline_mV,"));    logFile.println(baselineMv, 5);
+  logFile.print(F("alarm_percent,"));  logFile.println(currentAlarmPercent(), 1);
+  logFile.print(F("limit_low_mV,"));   logFile.println(low, 5);
+  logFile.print(F("limit_high_mV,"));  logFile.println(high, 5);
+  logFile.println(F("interval_s,0.5"));
+  logFile.println();
+  logFile.println(F("point,time_s,reading_mV,baseline_mV,delta_mV,alarm_percent,limit_low_mV,limit_high_mV,alarm"));
+  logFile.flush();
+}
+
+void logBaselineHeader() {
+  if (!logOpen) return;
+  logFile.print(F("file,"));  logFile.println(logFileName);
+  logFile.println(F("type,baseline recording (antenna in the air)"));
+  logFile.println(F("interval_s,0.5"));
+  logFile.println();
+  logFile.println(F("point,time_s,reading_mV"));
+  logFile.flush();
+}
+
+// =====================================================================
+//  PRINTING HELPERS
+// =====================================================================
 void setLeds(bool green, bool red) {
   digitalWrite(PIN_LED_GREEN, green ? HIGH : LOW);
   digitalWrite(PIN_LED_RED,   red   ? HIGH : LOW);
@@ -427,13 +509,16 @@ void setLeds(bool green, bool red) {
 
 void printMv(Print &out, float mv) { out.print(mv, 4); }
 
-void printKnob() {
-  Serial.print(F("Knob position ")); Serial.print(knobPosition + 1);
-  Serial.print(F(" of 3  ->  threshold factor ")); Serial.print(KNOB_FACTOR[knobPosition], 2); Serial.print('x');
+void printAlarmRule() {
+  Serial.print(F("Alarm rule: outside baseline +/- ")); Serial.print(currentAlarmPercent(), 1); Serial.print(F(" %"));
+#if KNOB_ENABLED
+  Serial.print(F("  (knob position ")); Serial.print(knobPosition + 1); Serial.print(F(" of 3)"));
+#endif
   if (baselineValid) {
-    float thr = KNOB_FACTOR[knobPosition] * fabs(baselineMv);
-    if (thr < MIN_THRESHOLD_MV) thr = MIN_THRESHOLD_MV;
-    Serial.print(F("  ->  alarm if |delta| >= ")); printMv(Serial, thr); Serial.print(F(" mV"));
+    float thr, low, high;
+    alarmLimits(currentAlarmPercent(), thr, low, high);
+    Serial.print(F("  ->  alarm if reading < ")); printMv(Serial, low);
+    Serial.print(F(" mV or > "));                 printMv(Serial, high); Serial.print(F(" mV"));
   }
   Serial.println();
 }
@@ -451,12 +536,20 @@ void printStatus() {
   Serial.print(F("State      : "));
   Serial.println(phase == IDLE ? F("IDLE") : phase == BASELINE_RECORDING ? F("RECORDING BASELINE") : F("SCANNING"));
   Serial.print(F("Baseline   : "));
-  if (baselineValid) { printMv(Serial, baselineMv); Serial.println(F(" mV")); } else Serial.println(F("none yet"));
+  if (baselineValid) {
+    printMv(Serial, baselineMv); Serial.print(F(" mV  (average of ")); Serial.print(baselinePoints);
+    Serial.print(F(" points"));
+    if (baselineFileName[0]) { Serial.print(F(", ")); Serial.print(baselineFileName); }
+    Serial.println(')');
+  } else Serial.println(F("none yet"));
   Serial.print(F("Last read  : ")); printMv(Serial, lastReadingMv); Serial.println(F(" mV"));
-  printKnob();
-  Serial.print(F("Samples    : ")); Serial.print(sampleNumber); Serial.println(F(" in the current phase"));
+  printAlarmRule();
+  Serial.print(F("Points     : ")); Serial.print(sampleNumber); Serial.println(F(" in the current phase"));
   Serial.print(F("Alarm      : ")); Serial.println(alarmActive ? F("ON") : F("off"));
-  Serial.print(F("SD card    : ")); if (sdReady) Serial.println(logFileName); else Serial.println(F("not present (Serial only)"));
+  Serial.print(F("SD card    : "));
+  if (!sdReady) Serial.println(F("not present (Serial only)"));
+  else if (logOpen) { Serial.print(F("writing ")); Serial.println(logFileName); }
+  else Serial.println(F("OK, no file open"));
   Serial.print(F("ADC        : "));
 #if TEST_MODE
   Serial.println(F("SIMULATED (TEST_MODE 1)"));
@@ -467,63 +560,42 @@ void printStatus() {
   Serial.println(F("----------------------------------------"));
 }
 
-// One log line to Serial AND to the SD card.
-void logRow(const __FlashStringHelper *phaseName, unsigned long n, float mv,
-            bool haveDelta, float delta, uint8_t knob, float thr, bool alarm) {
+// One baseline (air) reading -> Serial and SD
+void logBaselineRow(unsigned long n, float mv) {
   float t = millis() / 1000.0;
-
-  // ---- Serial (human readable) ----
-  Serial.print(t, 1);           Serial.print(F(" s  "));
-  Serial.print(phaseName);      Serial.print(F("  #"));
-  Serial.print(n);              Serial.print(F("  reading="));
-  printMv(Serial, mv);          Serial.print(F(" mV"));
-  if (baselineValid) {
-    Serial.print(F("  baseline=")); printMv(Serial, baselineMv); Serial.print(F(" mV"));
-  }
-  if (haveDelta) {
-    Serial.print(F("  delta="));    printMv(Serial, delta);    Serial.print(F(" mV"));
-    Serial.print(F("  knob="));     Serial.print(knob + 1);
-    Serial.print(F(" ("));          Serial.print(KNOB_FACTOR[knob], 2); Serial.print(F("x)"));
-    Serial.print(F("  threshold=")); printMv(Serial, thr);     Serial.print(F(" mV"));
-    Serial.print(alarm ? F("  *** ALARM ***") : F("  ok"));
-  }
-  Serial.println();
-
-  // ---- SD card (CSV) ----
-  if (sdReady) {
-    logFile.print(t, 1);          logFile.print(',');
-    logFile.print(phaseName);     logFile.print(',');
-    logFile.print(n);             logFile.print(',');
-    logFile.print(mv, 5);         logFile.print(',');
-    if (baselineValid) logFile.print(baselineMv, 5);
-    logFile.print(',');
-    if (haveDelta) {
-      logFile.print(delta, 5);    logFile.print(',');
-      logFile.print(knob + 1);    logFile.print(',');
-      logFile.print(KNOB_FACTOR[knob], 3); logFile.print(',');
-      logFile.print(thr, 5);      logFile.print(',');
-      logFile.print(alarm ? 1 : 0);
-    } else {
-      logFile.print(F(",,,,"));
-    }
-    logFile.println();
+  Serial.print(t, 1);  Serial.print(F(" s  AIR   #")); Serial.print(n);
+  Serial.print(F("  reading=")); printMv(Serial, mv); Serial.println(F(" mV"));
+  if (logOpen) {
+    logFile.print(n);     logFile.print(',');
+    logFile.print(t, 1);  logFile.print(',');
+    logFile.println(mv, 5);
     logFile.flush();              // make sure it is really on the card (battery could be pulled)
   }
 }
 
-// A free-text event line (start/stop messages) to Serial and SD.
-//   valueKind: 0 = no value, 1 = value is millivolts, 2 = value is a sample count
-void logEvent(const __FlashStringHelper *text, float value, uint8_t valueKind) {
-  Serial.print(F("---- ")); Serial.print(text);
-  if (valueKind == 1) { Serial.print(' '); printMv(Serial, value); Serial.print(F(" mV")); }
-  if (valueKind == 2) { Serial.print(F(", total samples = ")); Serial.print((unsigned long)value); }
-  Serial.println(F(" ----"));
-  if (sdReady) {
-    logFile.print(millis() / 1000.0, 1); logFile.print(F(",EVENT,"));
-    if (valueKind == 2) logFile.print((unsigned long)value);     // sample column = total count
-    logFile.print(',');
-    if (valueKind == 1) logFile.print(value, 5);                  // reading column = baseline mV
-    logFile.print(F(",,,,,,")); logFile.print(text); logFile.println();
+// One scan reading -> Serial and SD
+void logScanRow(unsigned long n, float mv, float delta, float percent, float low, float high, bool alarm) {
+  float t = millis() / 1000.0;
+  Serial.print(t, 1);           Serial.print(F(" s  SCAN  #"));
+  Serial.print(n);              Serial.print(F("  reading="));
+  printMv(Serial, mv);          Serial.print(F(" mV  baseline="));
+  printMv(Serial, baselineMv);  Serial.print(F(" mV  delta="));
+  if (delta >= 0) Serial.print('+');
+  printMv(Serial, delta);       Serial.print(F(" mV  limits "));
+  printMv(Serial, low);         Serial.print(F(" .. "));
+  printMv(Serial, high);        Serial.print(F(" mV"));
+  Serial.println(alarm ? F("  *** ALARM ***") : F("  ok"));
+
+  if (logOpen) {
+    logFile.print(n);            logFile.print(',');
+    logFile.print(t, 1);         logFile.print(',');
+    logFile.print(mv, 5);        logFile.print(',');
+    logFile.print(baselineMv, 5); logFile.print(',');
+    logFile.print(delta, 5);     logFile.print(',');
+    logFile.print(percent, 1);   logFile.print(',');
+    logFile.print(low, 5);       logFile.print(',');
+    logFile.print(high, 5);      logFile.print(',');
+    logFile.println(alarm ? 1 : 0);
     logFile.flush();
   }
 }
@@ -531,16 +603,37 @@ void logEvent(const __FlashStringHelper *text, float value, uint8_t valueKind) {
 // =====================================================================
 //  THE FOUR ACTIONS  (called by the buttons AND by Serial commands)
 // =====================================================================
+void finishScanFile() {
+  if (logOpen) {
+    logFile.println();
+    logFile.print(F("points,")); logFile.println(sampleNumber);
+    logClose();
+  }
+}
+
 void actionStartBaseline() {
+  if (phase == SCANNING) {                         // Button 1 during a scan = stop the scan first
+    finishScanFile();
+    alarmActive = false; buzzerSilent();
+    Serial.println(F("---- SOIL SCAN STOPPED (new baseline requested) ----"));
+  } else if (phase == BASELINE_RECORDING) {
+    logClose();                                    // restart: throw the half-finished recording away
+  }
   soundClick();
   phase = BASELINE_RECORDING;
   baselineValid = false;
-  alarmActive = false; buzzerSilent();
+  baselineFileName[0] = 0;
   baselineSum = 0.0;
   sampleNumber = 0;
   accSum = 0.0; accCount = 0; lastSampleMs = millis();
   setLeds(false, false);
-  logEvent(F("BASELINE RECORDING STARTED - hold the antenna in the air and keep still"), 0, 0);
+  Serial.println(F("---- BASELINE RECORDING STARTED - hold the antenna in the air and keep still ----"));
+  if (logOpenNew("BASE")) {
+    logBaselineHeader();
+    Serial.print(F("Logging to ")); Serial.println(logFileName);
+  } else {
+    Serial.println(F("(no SD card - Serial only)"));
+  }
   Serial.println(F("Recording... press Button 2 when you have enough readings (20 s = about 40 readings)."));
 }
 
@@ -551,17 +644,27 @@ void actionStopBaseline() {
   }
   phase = IDLE;
   if (sampleNumber > 0) {
+    baselinePoints = sampleNumber;
     baselineMv = baselineSum / sampleNumber;
     baselineValid = true;
     setLeds(true, false);                        // green solid = ready
-    Serial.print(F("Baseline = average of ")); Serial.print(sampleNumber); Serial.println(F(" readings:"));
-    logEvent(F("BASELINE SET"), baselineMv, 1);
-    printKnob();
+    Serial.print(F("---- BASELINE SET: average of ")); Serial.print(baselinePoints);
+    Serial.print(F(" readings = ")); printMv(Serial, baselineMv); Serial.println(F(" mV ----"));
+    if (logOpen) {
+      strncpy(baselineFileName, logFileName, sizeof(baselineFileName));
+      logFile.println();
+      logFile.print(F("points,"));      logFile.println(baselinePoints);
+      logFile.print(F("baseline_mV,")); logFile.println(baselineMv, 5);
+      logClose();
+      Serial.print(F("Saved ")); Serial.println(baselineFileName);
+    }
+    printAlarmRule();
     Serial.println(F("Green LED on. Press Button 3 to start scanning."));
     soundBaselineSet();
   } else {
     setLeds(false, false);
-    logEvent(F("BASELINE STOPPED - no readings were taken - no baseline set"), 0, 0);
+    logClose();
+    Serial.println(F("---- BASELINE STOPPED - no readings were taken - no baseline set ----"));
     soundClick();
   }
 }
@@ -576,13 +679,24 @@ void actionStartScan() {
     Serial.println(F("(Already scanning.)"));
     return;
   }
+  if (phase == BASELINE_RECORDING) {
+    Serial.println(F("(Finish the baseline with Button 2 first.)"));
+    soundError();
+    return;
+  }
   phase = SCANNING;
   sampleNumber = 0;
   alarmActive = false;
   accSum = 0.0; accCount = 0; lastSampleMs = millis();
   setLeds(true, false);
-  logEvent(F("SOIL SCAN STARTED - baseline"), baselineMv, 1);
-  printKnob();
+  Serial.print(F("---- SOIL SCAN STARTED - baseline ")); printMv(Serial, baselineMv); Serial.println(F(" mV ----"));
+  if (logOpenNew("SCAN")) {
+    logScanHeader();
+    Serial.print(F("Logging to ")); Serial.println(logFileName);
+  } else {
+    Serial.println(F("(no SD card - Serial only)"));
+  }
+  printAlarmRule();
   soundScanStart();
 }
 
@@ -593,9 +707,11 @@ void actionStopScan() {
   }
   phase = IDLE;
   alarmActive = false; buzzerSilent();
-  lastScanTotal = sampleNumber;
   setLeds(true, false);                          // alarm off, green stays on (baseline kept)
-  logEvent(F("SOIL SCAN STOPPED"), (float)sampleNumber, 2);
+  Serial.print(F("---- SOIL SCAN STOPPED, total points = ")); Serial.print(sampleNumber);
+  if (logOpen) { Serial.print(F(", saved ")); Serial.print(logFileName); }
+  Serial.println(F(" ----"));
+  finishScanFile();
   Serial.println(F("Idle. Button 3 = scan again with the same baseline, Button 1 = record a new baseline."));
   soundScanStop();
 }
@@ -627,14 +743,19 @@ void setup() {
   delay(200);
   Serial.println();
   Serial.println(F("=============================================="));
-  Serial.println(F(" Millivolt Measurement & Alarm System  v1.1"));
+  Serial.println(F(" Millivolt Measurement & Alarm System  v1.2"));
   Serial.println(F("=============================================="));
   Serial.print(F("Sample interval : ")); Serial.print(SAMPLE_INTERVAL_MS); Serial.println(F(" ms"));
-  Serial.print(F("Knob factors    : ")); Serial.print(KNOB_FACTOR[0], 2); Serial.print(F("x / "));
-  Serial.print(KNOB_FACTOR[1], 2); Serial.print(F("x / ")); Serial.print(KNOB_FACTOR[2], 2); Serial.println(F("x of |baseline|"));
+  Serial.print(F("Alarm rule      : outside baseline +/- "));
+#if KNOB_ENABLED
+  Serial.print(KNOB_PERCENT[0], 1); Serial.print(F(" / ")); Serial.print(KNOB_PERCENT[1], 1);
+  Serial.print(F(" / ")); Serial.print(KNOB_PERCENT[2], 1); Serial.println(F(" % (knob position 1 / 2 / 3)"));
+#else
+  Serial.print(ALARM_PERCENT, 1); Serial.println(F(" %  (fixed - knob not used)"));
+#endif
   Serial.print(F("Alarm direction : ")); Serial.println(ALARM_BOTH_DIRECTIONS ? F("either direction") : F("above baseline only"));
 #if TEST_MODE
-  Serial.println(F("*** TEST MODE: the ADC is simulated (about 0.070 mV with noise). ***"));
+  Serial.println(F("*** TEST MODE: the ADC is simulated (about 0.072 mV with noise). ***"));
 #endif
 
   // Power-on self test: LEDs and a short rising jingle
@@ -645,11 +766,10 @@ void setup() {
   SPI.begin();
 
   // ---- SD card ----
-  sdReady = sdStart();
-  if (sdReady) {
-    Serial.print(F("SD card OK, logging to ")); Serial.println(logFileName);
+  if (sdStart()) {
+    Serial.println(F("SD card OK - each baseline and each scan will be saved as its own file (BASExxxx.CSV / SCANxxxx.CSV)."));
   } else {
-    Serial.println(F("No SD card found - continuing with Serial logging only."));
+    Serial.println(F("No SD card found - continuing with Serial logging only (insert a card and press Button 1 or 3 to retry)."));
     for (uint8_t i = 0; i < 3; i++) { digitalWrite(PIN_LED_RED, HIGH); delay(120); digitalWrite(PIN_LED_RED, LOW); delay(120); }
   }
 
@@ -669,9 +789,11 @@ void setup() {
 
   Serial.println(F("Ready."));
   printHelp();
+#if KNOB_ENABLED
   knobPosition = 0;
   readKnobPosition();
-  printKnob();
+#endif
+  printAlarmRule();
   lastSampleMs = millis();
 }
 
@@ -680,17 +802,19 @@ void setup() {
 // =====================================================================
 void collectAdcReading() {
 #if TEST_MODE
-  // Simulated antenna: ~0.070 mV like the client's data, with +/-0.005 mV
-  // noise and a slow drift, 10 readings per second.
+  // Simulated antenna: ~0.072 mV like the client's data, with a little
+  // noise and a slow drift, 10 readings per second.  The simulated
+  // "buried object" ramps the reading up by about 0.012 mV (~ +17 %),
+  // similar to the client's own recorded anomaly (0.072 -> 0.081 mV).
   static unsigned long lastFakeMs = 0;
   static float anomalyLevel = 0.0;                        // ramps up/down so it looks real
   if (millis() - lastFakeMs < 100) return;
   lastFakeMs = millis();
-  float drift = 0.004 * sin(millis() / 30000.0);           // +/-0.004 mV over about 3 minutes
-  float noise = random(-50, 51) / 10000.0;                 // +/-0.005 mV
+  float drift = 0.001 * sin(millis() / 30000.0);           // +/-0.001 mV over about 3 minutes
+  float noise = random(-8, 9) / 10000.0;                   // +/-0.0008 mV
   bool anomaly = (phase == SCANNING) && (simulatedAnomaly || digitalRead(PIN_BTN_STOP_BASELINE) == LOW);
-  anomalyLevel += ((anomaly ? 0.150 : 0.0) - anomalyLevel) * 0.25;   // smooth ramp
-  accSum += 0.070 + drift + noise + anomalyLevel;
+  anomalyLevel += ((anomaly ? 0.012 : 0.0) - anomalyLevel) * 0.15;   // smooth ramp
+  accSum += 0.072 + drift + noise + anomalyLevel;
   accCount++;
 #else
   // If the loop was stalled (e.g. a slow SD-card write) we might land in the
@@ -758,10 +882,12 @@ void loop() {
   updateAlarmSound();
   handleSerialCommands();
 
+#if KNOB_ENABLED
   // ---- knob: report changes ----
   uint8_t before = knobPosition;
   readKnobPosition();
-  if (knobPosition != before) printKnob();
+  if (knobPosition != before) printAlarmRule();
+#endif
 
   // ---- buttons ----
   if (buttonWasPressed(btnStartBaseline)) actionStartBaseline();
@@ -774,7 +900,7 @@ void loop() {
     digitalWrite(PIN_LED_GREEN, (millis() % 1000) < 150 ? HIGH : LOW);
   }
 
-  // ---- every SAMPLE_INTERVAL_MS: turn the collected readings into one sample ----
+  // ---- every SAMPLE_INTERVAL_MS: turn the collected readings into one point ----
   if (millis() - lastSampleMs >= SAMPLE_INTERVAL_MS) {
     lastSampleMs = millis();
 
@@ -789,18 +915,18 @@ void loop() {
     if (phase == BASELINE_RECORDING) {
       sampleNumber++;
       baselineSum += mv;
-      logRow(F("AIR"), sampleNumber, mv, false, 0, 0, 0, false);
+      logBaselineRow(sampleNumber, mv);
     }
     else if (phase == SCANNING) {
       sampleNumber++;
       float delta = mv - baselineMv;
-      uint8_t knob = knobPosition;
-      float threshold = KNOB_FACTOR[knob] * fabs(baselineMv);
-      if (threshold < MIN_THRESHOLD_MV) threshold = MIN_THRESHOLD_MV;
-      bool alarm = ALARM_BOTH_DIRECTIONS ? (fabs(delta) >= threshold) : (delta >= threshold);
+      float percent = currentAlarmPercent();
+      float thr, low, high;
+      alarmLimits(percent, thr, low, high);
+      bool alarm = ALARM_BOTH_DIRECTIONS ? (fabs(delta) >= thr) : (delta >= thr);
       alarmActive = alarm;                       // buzzer pattern follows this (see updateAlarmSound)
       setLeds(true, alarm);                      // red LED follows the alarm
-      logRow(F("SCAN"), sampleNumber, mv, true, delta, knob, threshold, alarm);
+      logScanRow(sampleNumber, mv, delta, percent, low, high, alarm);
     }
     else {
       // IDLE: show a live reading every 2 s so you can see it working on the bench
