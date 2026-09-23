@@ -1,6 +1,6 @@
 /*
   =====================================================================
-   MILLIVOLT MEASUREMENT AND ALARM SYSTEM                      v2.7
+   MILLIVOLT MEASUREMENT AND ALARM SYSTEM                      v3.0
    Arduino UNO R3  +  ADS1256 24-bit ADC  +  microSD logging
   =====================================================================
 
@@ -20,11 +20,14 @@
        ->  the operator puts the antenna in its normal scanning
            position over ordinary ground.
      START
+       ->  a short click immediately confirms that the button was seen.
+           If the power-on zero was not accepted, START safely retries it
+           once and continues automatically when it succeeds.
        ->  the FIRST 5 SECONDS of the real scan are the ground
            baseline.  The alarm is held off while it is learned.
        ->  after that every reading is compared with the CURRENT
            baseline:
-             inside  baseline +/- 10 %  = NORMAL, and the reading is
+             inside  baseline +/- knob %  = NORMAL, and the reading is
                allowed into the rolling 30-second baseline average
              outside                    = ABNORMAL, logged, counted,
                and NEVER allowed into the baseline
@@ -50,9 +53,16 @@
          The antenna MUST be in its normal scanning position over
          representative ordinary ground - NOT held in the air.
 
-   Alarm rule (confirmed by the client, 16 Sep 2026):
-     "The trigger threshold should always be the baseline plus / minus 10 %"
-     -> alarm when  reading > baseline + 10 %   or   reading < baseline - 10 %
+   Alarm rule:
+     alarm when  reading > baseline + P %   or   reading < baseline - P %
+     P is set by the potentiometer on A0, 10.0 % to 100.0 % in 0.5 % steps,
+     read when START is pressed and FROZEN for that scan.  It is printed
+     on the Serial Monitor whenever the knob is turned while idle, again
+     at START, and written into the CSV header as Alarm_Threshold_Percent.
+     A smaller percentage is more sensitive; a larger percentage requires
+     a larger change from the baseline before the alarm sounds.
+     (The client's original instruction, 16 Sep 2026, was "always the
+     baseline plus / minus 10 %".  KNOB_ENABLED 0 restores exactly that.)
 
    Logging:
      Every reading goes to the Serial Monitor (115200 baud).  With a
@@ -73,6 +83,7 @@
    Sounds
    ------
      power-on ........ three rising notes
+     START received .. one short click; wait while preflight finishes
      zero cal done ... two beeps, same pitch
      scan started .... one long beep
      baseline ready .. two rising notes - the alarm is now live
@@ -85,12 +96,98 @@
      green blinking (fast, ~3 Hz) .. calibrating the electrical zero
      green blinking (very fast) .... settling, then learning the baseline
      green blinking (slow wink) .... READY but NOT zero-calibrated;
-                                     START will be refused
+                                     START will retry once
      green solid ................... ready, or scanning normally
      red solid ..................... ALARM
      red winks once every 2 s ...... a fault: ADC, SD card, or a missing
                                      zero calibration (details on the
                                      Serial Monitor and in 's')
+
+   ---------------------------------------------------------------------
+   What changed in v3.0  -  RELEASE HARDENING AND CLEAN CSV
+   ---------------------------------------------------------------------
+   * ADC silence now voids an active scan immediately.  It can no longer
+     be reported COMPLETE if STOP is pressed before the recovery retry.
+   * Consecutive full-scale conversions are treated as an input fault,
+     excluded from the baseline, and void an active scan.
+   * SD-card mount, file-create and write failures are visible faults.
+     REQUIRE_SD_FOR_SCAN defaults to true, so a field scan cannot appear
+     healthy while saving nothing.
+   * Zero calibration now has to leave a measured residual within
+     CAL_VERIFY_MV before START is allowed.
+   * STOP before baseline learning finishes is marked INCOMPLETE, not
+     COMPLETE.  Serial and CSV status messages now agree on every exit.
+   * CSV fields are no longer padded with spaces.  Empty values are truly
+     empty, so strict parsers and exact-match filters work without TRIM().
+   * The knob deadband was reduced so a slow end-to-end turn reaches all
+     181 half-percent settings from 10.0 % through 100.0 %.
+   * TEST_MODE identifies simulated data in the CSV and provides 20 %,
+     60 % and 120 % anomaly levels for endpoint verification.
+   * START now acknowledges the button immediately and, when necessary,
+     retries zero calibration once before either starting automatically or
+     reporting a clear four-beep/red-wink fault.
+
+   ---------------------------------------------------------------------
+   What changed in v2.9  -  KNOB RANGE 10 % TO 100 %
+  ---------------------------------------------------------------------
+   The active A0 threshold knob now covers 10.0 % through 100.0 %, still
+   in 0.5 % steps.  Fully toward the low end is the most sensitive setting:
+   a 10 % change from the rolling baseline can alarm.  At the high end a
+   reading must move by 100 % of the baseline before it can alarm.
+
+   The setting is still frozen when START is pressed, printed on Serial,
+   and saved as Alarm_Threshold_Percent in that scan's CSV.  The detection,
+   rolling-baseline, confirmation, calibration and logging paths are
+   otherwise unchanged from v2.8.
+
+  ---------------------------------------------------------------------
+   What changed in v2.8  -  THE ALARM PERCENTAGE IS ON A KNOB
+  ---------------------------------------------------------------------
+   The 10 k potentiometer on A0, wired since v1.x and ignored since the
+   client fixed the rule at 10 %, now sets the alarm percentage: 5.0 %
+   to 30.0 % in 0.5 % steps (KNOB_MIN_PERCENT / KNOB_MAX_PERCENT).
+
+     * FROZEN AT START.  The knob is read once when START is pressed and
+       that value is used for the whole scan.  Turning it mid-scan cannot
+       change a recording, and a file never contains two rules.  During a
+       scan the knob is not read at all, so the scan path is unchanged.
+
+     * THE FILE SAYS WHICH.  Alarm_Threshold_Percent in the CSV header
+       was already derived from the rule in force, so it now carries the
+       knob's value with no change to the file format.
+
+     * VISIBLE ON THE BENCH.  While idle, turning the knob prints the new
+       setting (a slow turn prints every 0.5 % step).  START prints the
+       frozen value, as do the banner and 's'.  In the field, with no
+       Serial Monitor, the knob needs a marked scale: at 5 - 30 % the
+       centre is 17.5 % and 10 % is about one fifth of the way round.
+
+     * NO FLICKER.  The reading is an average of 16 and has a 6-count
+       deadband, so a knob parked between two steps cannot flip between
+       them - and the value START freezes is the value last printed.
+
+   Built from a first draft of this feature that was written against an
+   older copy (v2.4 plus the v2.5 change) and called itself v2.6;
+   dropped in as it was, it would have discarded the real v2.6 (the
+   aligned CSV) and v2.7 (the armed tone).  That draft also did not compile: static_assert cannot
+   test a plain "const float".  Here the limits are constexpr and the
+   compiler also checks they are whole or half percentages.
+
+   Also fixed while here:
+     * 's' during the settle and learning period showed the knob's live
+       value rather than the rule the scan had frozen.
+     * Alarm limits are printed only while a scan is running.  After STOP
+       they were being quoted against the previous scan's baseline.
+     * A comment in automaticZeroCalibration() still promised that the
+       learning period aborts a near-zero baseline.  v2.5 removed that
+       abort; the comment now says so.  (Comment only.)
+
+   Paid for, at 99 % flash, by merging the three-line start-up banner
+   into one and shortening three rare Serial messages ("not scanning",
+   "ADC not responding - scan refused", "file numbers all used").
+   Nothing else in the measurement, detection or file format changed.
+   With KNOB_ENABLED 0 this build is 150 bytes SMALLER than v2.7.
+   32,088 of 32,256 bytes (99 %), 168 free, on arduino:avr 1.8.8.
 
   ---------------------------------------------------------------------
    What changed in v2.7  -  A TONE WHEN THE ALARM GOES LIVE
@@ -472,8 +569,12 @@
      D11 (MOSI)    ->  ADS1256 DIN    and  SD breakout DI
      D12 (MISO)    <-  ADS1256 DOUT   and  SD breakout DO
      D13 (SCK)     ->  ADS1256 SCLK   and  SD breakout CLK
-     A0            <-  Potentiometer (unused: the threshold is fixed at
-                       10 %, KNOB_ENABLED is 0)
+     A0            <-  10 k potentiometer WIPER (centre pin) = alarm %
+                       outer pins: one to 5V, the other to GND.  For
+                       "clockwise = higher %", looking at the front of
+                       the pot with the pins pointing down: RIGHT pin
+                       to 5V, LEFT pin to GND.  Wired the other way
+                       round it simply works backwards.
      A1            ->  SD breakout CS
      A2            ->  ADS1256 PDWN (labelled SYNC on some boards)
      A3            ->  NOT USED.  This ADS1256 module has no RESET pin;
@@ -509,7 +610,8 @@
 #include <SD.h>
 #include <avr/wdt.h>
 
-#define FIRMWARE_VERSION "v2.7"
+#define FIRMWARE_VERSION "v3.0"
+#define FIRMWARE_BUILD_DATE "23 Sep 2026"
 
 // =====================================================================
 //  SETTINGS  (the only block you normally need to touch)
@@ -519,13 +621,17 @@
 // up a realistic antenna reading (about 0.072 mV with noise and slow
 // drift, like the client's own data) so you can test the buttons, LEDs,
 // buzzer and SD card.  While SCANNING in test mode you can fake a
-// "buried object" by HOLDING BUTTON 2, or by typing  a  in the Serial
-// Monitor (toggles it on/off).  Set to 0 for the real device.
+// "buried object" by typing a in the Serial Monitor.  Repeated presses
+// cycle OFF -> +20 % -> +60 % -> +120 % -> OFF, which verifies the
+// 10 %, 55 % and 100 % knob settings.  Set to 0 for the real device.
+#ifndef TEST_MODE
 #define TEST_MODE 0
+#endif
 
 // ---- Alarm rule ---------------------------------------------------
-// Alarm when the reading is outside  baseline +/- ALARM_PERCENT.
-// The client's instruction: "always the baseline plus / minus 10 %".
+// The alarm percentage used when KNOB_ENABLED (below) is 0.  With the
+// knob enabled, the knob sets it instead.  10 % is the client's own
+// instruction: "always the baseline plus / minus 10 %".
 const float ALARM_PERCENT = 10.0;
 
 // true  = alarm when the reading moves away from the baseline in EITHER
@@ -592,7 +698,12 @@ const unsigned long CAL_SETTLE_MS = 5000;
 // skipped.  Well above the few microvolts of system offset (the measured
 // relay-closed zero on 21 Sep was -2.53 uV), well below a healthy
 // antenna signal (the client's range starts at 20 uV).
-const float CAL_SANITY_MV = 0.010;
+constexpr float CAL_SANITY_MV = 0.010;
+
+// A calibration is accepted only if the measured residual afterwards is
+// no larger than this.  0.002 mV = 2 microvolts, equal to the client's
+// original 10 % band at the specified 0.020 mV minimum signal.
+constexpr float CAL_VERIFY_MV = 0.002;
 
 // Conversions thrown away after the relay moves, before anything is
 // believed.  The relay contacts settle in about a millisecond, but the
@@ -601,14 +712,30 @@ const float CAL_SANITY_MV = 0.010;
 // which is what the successful 21 Sep relay/SYSOCAL test used.
 const uint8_t RELAY_SETTLE_CONVERSIONS = 5;
 
-// ---- Threshold knob (potentiometer on A0) --------------------------
-// 0 = the knob is ignored; the alarm percentage is always ALARM_PERCENT.
-//     (This is what the client asked for.)
-// 1 = the knob selects the percentage: left / middle / right position
-//     -> KNOB_PERCENT[0] / [1] / [2].  The value in force when Button 3
-//     is pressed is used for the whole scan.
-#define KNOB_ENABLED 0
-const float KNOB_PERCENT[3] = {5.0, 10.0, 20.0};
+// ---- Threshold knob (10 k potentiometer on A0) ---------------------
+// 1 = the knob sets the alarm percentage, anywhere from KNOB_MIN_PERCENT
+//     to KNOB_MAX_PERCENT in 0.5 % steps.  The setting is read when
+//     START is pressed and FROZEN for that scan - turning the knob
+//     mid-scan cannot change a recording - and it is written into the
+//     CSV header as Alarm_Threshold_Percent.
+// 0 = the knob is ignored and every scan uses ALARM_PERCENT above
+//     (the client's original "always baseline +/- 10 %").
+// Both limits must be whole or half percentages (10.0, 12.5, 100.0 ...);
+// the compiler refuses anything else.  With the knob wired as in the
+// wiring summary, fully anticlockwise = KNOB_MIN_PERCENT.  At 10 - 100 %
+// the centre is 55 %.  Lower percentages are more sensitive; higher
+// percentages require a larger change before the alarm sounds.
+// While the unit is idle the knob is read after every conversion (10
+// times a second) and any change is printed on the Serial Monitor, so
+// the setting can be dialled in by eye on the bench.  During a scan it
+// is not read at all.
+#define KNOB_ENABLED 1
+constexpr float KNOB_MIN_PERCENT = 10.0;
+constexpr float KNOB_MAX_PERCENT = 100.0;
+
+// Field operation requires a persistent CSV.  Set this to false only for
+// controlled bench work where Serial-only operation is intentional.
+const bool REQUIRE_SD_FOR_SCAN = true;
 
 // ---- Buzzer -------------------------------------------------------
 // BUZZER_PASSIVE: 1 = passive buzzer or passive buzzer MODULE (needs a
@@ -656,8 +783,8 @@ const unsigned long LOG_FLUSH_MS = 2000;
 const uint8_t SYSOCAL_AVG_POINTS = 10;
 
 // ---- Indicators ---------------------------------------------------
-// Blink the green LED while calibrating and while the first 10 readings
-// are being learned.  Solid green = ready, or scanning normally.
+// Blink the green LED while calibrating and during settling/baseline
+// learning.  Solid green = ready, or scanning normally.
 const bool BLINK_GREEN_WHEN_BUSY = true;
 
 // ---- Watchdog -----------------------------------------------------
@@ -714,11 +841,11 @@ const uint8_t  MV_DECIMALS        = 5;      // 0.00001 mV = 0.01 microvolt
 const unsigned long IDLE_PRINT_MS = 2000;   // live reading on the Serial Monitor when idle
 const unsigned long ADC_RETRY_MS  = 2000;   // how often to re-check a faulty ADC when idle
 const unsigned long ADC_RETRY_BUSY_MS = 10000;  // ... and while a recording is running
-const unsigned long STALL_MS      = 50;     // a gap longer than this means the loop was held up
 const unsigned long FAULT_WINK_MS = 80;     // red LED wink length when something is wrong
 const unsigned long FAULT_WINK_PERIOD_MS = 2000;
 const uint16_t MAX_FILE_INDEX     = 9999;   // SCAN9999.CSV
 const long     ADC_SATURATED_COUNTS = 8380000L;  // practically full scale for a 24-bit result
+const uint8_t  ADC_SATURATION_CONFIRM_POINTS = 3;
 
 // =====================================================================
 //  TYPES  (defined up here because the Arduino IDE needs them before
@@ -768,6 +895,20 @@ static_assert(ALARM_BEEP_ON_MS < ALARM_BEEP_PERIOD_MS,
               "ALARM_BEEP_ON_MS must be shorter than ALARM_BEEP_PERIOD_MS");
 static_assert(ALARM_CONFIRM_POINTS >= 1,
               "ALARM_CONFIRM_POINTS must be at least 1");
+static_assert(CAL_VERIFY_MV > 0.0 && CAL_VERIFY_MV < CAL_SANITY_MV,
+              "CAL_VERIFY_MV must be above zero and below CAL_SANITY_MV");
+static_assert(ADC_SATURATION_CONFIRM_POINTS >= 1,
+              "ADC_SATURATION_CONFIRM_POINTS must be at least 1");
+// The knob works in half-percent steps held in a uint8_t.  constexpr,
+// not const: a plain const float cannot appear in a static_assert,
+// which is exactly why the first draft of this feature did not compile.
+static_assert(KNOB_MIN_PERCENT > 0.0 && KNOB_MAX_PERCENT > KNOB_MIN_PERCENT,
+              "KNOB_MIN_PERCENT must be above 0 and below KNOB_MAX_PERCENT");
+static_assert(KNOB_MIN_PERCENT * 2.0 == (long)(KNOB_MIN_PERCENT * 2.0) &&
+              KNOB_MAX_PERCENT * 2.0 == (long)(KNOB_MAX_PERCENT * 2.0),
+              "Knob limits must be whole or half percentages");
+static_assert((KNOB_MAX_PERCENT - KNOB_MIN_PERCENT) * 2.0 < 255.0,
+              "Knob range too wide: at most 127 % from end to end");
 
 // =====================================================================
 //  WATCHDOG HELPERS
@@ -881,8 +1022,9 @@ void updateBuzzer() {
   seqNext++;
 }
 
-// Only used in setup(), where blocking is harmless and an immediate
-// power-on jingle tells the operator the unit is alive.
+// Used for short acknowledgement sounds where the next action may block
+// for several seconds.  Completing the click first makes a button press
+// unmistakable even while SD.begin() or zero calibration is busy.
 void soundPlayBlocking(const Note *seq) {
   soundStart(seq);
   while (seqRunning) { updateBuzzer(); watchdogKick(); }
@@ -997,6 +1139,9 @@ float adsCountsToMillivolts(long counts) {
 
 // Defined further down, where the recording state it needs is in scope.
 void invalidateSystemZeroCalibration();
+void actionStopScan();
+void actionSystemZeroCalibrate();
+bool automaticZeroCalibration();
 
 // Power up, configure and self-calibrate the ADC.  Returns true if the
 // chip answered correctly (we read back the registers we wrote).
@@ -1027,17 +1172,23 @@ bool adsInitialise(bool quiet) {
   adsWriteRegisters(ADS_REG_STATUS, cfg, 4);
   delay(2);
 
-  uint8_t mux   = adsReadRegister(ADS_REG_MUX);
-  uint8_t adcon = adsReadRegister(ADS_REG_ADCON);
-  uint8_t drate = adsReadRegister(ADS_REG_DRATE);
+  uint8_t status = adsReadRegister(ADS_REG_STATUS);
+  uint8_t mux    = adsReadRegister(ADS_REG_MUX);
+  uint8_t adcon  = adsReadRegister(ADS_REG_ADCON);
+  uint8_t drate  = adsReadRegister(ADS_REG_DRATE);
 
   if (!quiet) {
-    Serial.print(F("ADS1256 registers read back: MUX=0x"));  Serial.print(mux, HEX);
+    Serial.print(F("ADS1256 registers: STATUS=0x"));         Serial.print(status, HEX);
+    Serial.print(F(" MUX=0x"));                             Serial.print(mux, HEX);
     Serial.print(F(" ADCON=0x"));                            Serial.print(adcon, HEX);
     Serial.print(F(" DRATE=0x"));                            Serial.println(drate, HEX);
   }
 
-  if (mux != ADS_MUX_VAL || adcon != ADS_ADCON_VAL || drate != ADS_DRATE_VAL) {
+  // STATUS[7:4] is the factory ID and STATUS[0] reflects DRDY.  Verify
+  // only the writable ORDER/ACAL/BUFEN bits [3:1], especially BUFEN: a
+  // failed buffer-enable write would materially load the antenna input.
+  if ((status & 0x0E) != (ADS_STATUS_VAL & 0x0E) ||
+      mux != ADS_MUX_VAL || adcon != ADS_ADCON_VAL || drate != ADS_DRATE_VAL) {
     return false;   // the chip is not talking to us (check wiring / power)
   }
 
@@ -1089,7 +1240,13 @@ bool adsAverageBlocking(uint8_t n, float &avgMv) {
   uint8_t got = 0;
   for (uint8_t i = 0; i < n; i++) {
     if (!adsWaitForDataReady(1500)) break;     // kicks the watchdog while it waits
-    sum += adsCountsToMillivolts(adsReadConversion());
+    long counts = adsReadConversion();
+    // Do not let opposite-polarity rail hits cancel in the average and
+    // masquerade as a good zero calibration.
+    if (counts >= ADC_SATURATED_COUNTS || counts <= -ADC_SATURATED_COUNTS) {
+      return false;
+    }
+    sum += adsCountsToMillivolts(counts);
     got++;
     watchdogKick();
   }
@@ -1152,28 +1309,47 @@ bool buttonWasPressed(Button &b) {
 }
 
 // =====================================================================
-//  KNOB (potentiometer) -> position 0, 1 or 2   with a little hysteresis
-//  Only compiled in when KNOB_ENABLED is 1.
+//  KNOB (potentiometer)  ->  alarm percentage in 0.5 % steps
 // =====================================================================
+// The wiper divides the UNO's own 5 V, and analogRead() measures against
+// that same 5 V, so the result depends only on where the knob is, not on
+// the supply.  Sixteen readings are averaged (about 1.8 ms in total).
+//
+// DEADBAND.  Plain rounding would let a knob parked on the boundary
+// between two steps flicker between them - printing a new setting ten
+// times a second and making it a coin toss which one START freezes.  So
+// the average must move KNOB_DEADBAND counts (of 1023) from the last
+// accepted position before the setting is worked out again.  Noise on a
+// 16-reading average is about one count; one 0.5 % step at 10 - 100 % is
+// about 5.7 counts.  Three counts reject the measured jitter while still
+// allowing a slow sweep to visit every half-percent setting.  The value
+// START freezes is therefore the value last printed, unless the knob has
+// actually been turned since.
 #if KNOB_ENABLED
-uint8_t knobPosition = 0;
+const uint8_t  KNOB_STEPS    = (uint8_t)((KNOB_MAX_PERCENT - KNOB_MIN_PERCENT) * 2.0);
+const uint8_t  KNOB_DEADBAND = 3;
+uint8_t  knobStep = 0;                   // 0 .. KNOB_STEPS, in 0.5 % steps
+uint16_t knobRaw  = 0xFFFF;              // last accepted average; 0xFFFF = not read yet
 
-uint8_t readKnobPosition() {
-  int v = 0;
-  for (uint8_t i = 0; i < 8; i++) v += analogRead(PIN_POT);
-  v /= 8;                                            // 0 .. 1023
-  uint8_t candidate = (v < 341) ? 0 : (v < 682) ? 1 : 2;
-  const int HYST = 12;                               // stops flicker at the boundaries
-  if (candidate > knobPosition && v >= (int)(knobPosition + 1) * 341 + HYST) knobPosition = candidate;
-  if (candidate < knobPosition && v <  (int)knobPosition * 341 - HYST)       knobPosition = candidate;
-  return knobPosition;
+// Returns true when the setting changed.
+bool knobUpdate() {
+  uint16_t total = 0;
+  for (uint8_t i = 0; i < 16; i++) total += analogRead(PIN_POT);   // max 16368
+  uint16_t raw = total >> 4;                                        // 0 .. 1023
+  int16_t  d   = (int16_t)raw - (int16_t)knobRaw;
+  if (knobRaw != 0xFFFF && d > -KNOB_DEADBAND && d < KNOB_DEADBAND) return false;
+  knobRaw = raw;
+  uint8_t s = (uint8_t)(((uint32_t)raw * KNOB_STEPS + 511UL) / 1023UL);   // nearest step
+  if (s == knobStep) return false;
+  knobStep = s;
+  return true;
 }
 #endif
 
 // The alarm percentage the knob is selecting right now (or the fixed one)
 float knobAlarmPercent() {
 #if KNOB_ENABLED
-  return KNOB_PERCENT[knobPosition];
+  return KNOB_MIN_PERCENT + knobStep * 0.5;
 #else
   return ALARM_PERCENT;
 #endif
@@ -1209,6 +1385,9 @@ unsigned long lastIdlePrintMs  = 0;
 unsigned long lastConversionMs = 0;   // when the last fresh conversion arrived
 unsigned long lastFlushMs      = 0;
 float lastReadingMv = 0.0;
+#if !TEST_MODE
+bool drdyArmed = false;               // must see HIGH before accepting the next LOW
+#endif
 
 // Health and diagnostics
 bool     adcOk            = false;
@@ -1217,9 +1396,11 @@ bool     sdFault          = false;
 unsigned long adcRetryMs  = 0;
 unsigned long droppedPoints   = 0;   // points lost in the current recording
 unsigned long droppedTotal    = 0;   // points lost since power-on
-unsigned long saturatedCount  = 0;   // conversions at the end stops
+unsigned long saturatedPoints = 0;   // invalid full-scale conversions in this scan
+unsigned long saturatedTotal  = 0;   // invalid full-scale conversions since power-on
+uint8_t  saturationRun        = 0;
+bool     inputFault           = false;
 unsigned long adcResets       = 0;
-uint8_t  resetCause       = 0;
 unsigned long sysocalCount    = 0;   // how many times 'c' has been run since power-on
 bool     sysocalDone      = false;   // a SYSOCAL is currently in force
 bool     sysocalLost      = false;   // one was set, then wiped by a re-init
@@ -1228,7 +1409,8 @@ float    sysocalZeroAfter  = 0.0;    // measured zero just after it, mV
 
 // How the scan ended.  One explicit field beats a VOID line that only
 // appears on failure: a successful scan should say so just as plainly.
-const uint8_t SCAN_RUNNING = 0, SCAN_COMPLETE = 1, SCAN_ADC_RESET = 2;
+const uint8_t SCAN_RUNNING = 0, SCAN_COMPLETE = 1, SCAN_ADC_FAULT = 2,
+              SCAN_EARLY_STOP = 3, SCAN_INPUT_FAULT = 4, SCAN_SD_FAULT = 5;
 uint8_t  scanStatus  = SCAN_RUNNING;
 
 uint8_t  abnormalRun = 0;            // ABNORMAL readings in a row, right now
@@ -1245,10 +1427,11 @@ unsigned long alarmEvents = 0;       // times the alarm went from off to on
 unsigned long firstAlarmPoint = 0, lastAlarmPoint = 0;
 float initialBaselineMv = 0.0;       // the baseline the moment learning ended
 float maxAbsDelta = 0.0, maxDeltaPct = 0.0;
+bool  maxDeltaPctValid = false;
 unsigned long maxDeltaPoint = 0;
 
 #if TEST_MODE
-bool simulatedAnomaly = false;       // toggled with 'a' in the Serial Monitor
+uint8_t simulatedAnomalyLevel = 0;   // 0=off, then 20 %, 60 %, 120 %
 #endif
 
 // True when a valid zero calibration is missing and the unit is not in
@@ -1256,7 +1439,7 @@ bool simulatedAnomaly = false;       // toggled with 'a' in the Serial Monitor
 // which is why it counts as a fault for the indicator LEDs.
 bool zeroCalMissing() { return !sysocalDone && phase != CALIBRATING; }
 
-bool faultActive() { return sdFault || !adcOk || zeroCalMissing(); }
+bool faultActive() { return sdFault || !adcOk || inputFault || zeroCalMissing(); }
 
 // True while a scan is in progress, in any of its three states.
 bool recording() { return phase >= SETTLING; }
@@ -1265,11 +1448,11 @@ bool recording() { return phase >= SETTLING; }
 // exactly the client's  baseline x 0.90 .. baseline x 1.10;  fabs() is
 // used so that a negative baseline still gives low < high instead of
 // silently swapping the two limits.
-void alarmLimits(float percent, float &thr, float &low, float &high) {
-  thr = (percent / 100.0) * fabs(baselineMv);
+void alarmLimits(float base, float percent, float &thr, float &low, float &high) {
+  thr = (percent / 100.0) * fabs(base);
   if (thr < MIN_THRESHOLD_MV) thr = MIN_THRESHOLD_MV;
-  low  = baselineMv - thr;
-  high = baselineMv + thr;
+  low  = base - thr;
+  high = base + thr;
 }
 
 // =====================================================================
@@ -1361,6 +1544,8 @@ bool sdStart() {
   if (sdReady) {
     nextScanIndex = 0;
     sdFault = false;
+  } else {
+    sdFault = true;
   }
   return sdReady;
 }
@@ -1375,11 +1560,21 @@ void sdWriteFailed() {
   logFileName[0] = 0;
   sdReady = false;                        // force SD.begin() again next time
   sdFault = true;
+  // A failure can first appear on the final flush after phase has already
+  // returned to READY.  Preserve the truthful result for Serial even if
+  // the summary could not be completed on the card.
+  if (scanStatus == SCAN_RUNNING || scanStatus == SCAN_COMPLETE ||
+      scanStatus == SCAN_EARLY_STOP) scanStatus = SCAN_SD_FAULT;
   soundStart(SND_ERROR);
+  if (REQUIRE_SD_FOR_SCAN && recording()) {
+    actionStopScan();
+  }
 }
 
 // Called straight after a conversion has been read, when there is the
 // most time before the next one is due.
+bool logFlushChecked();
+
 void logFlushIfDue() {
   if (!logOpen) return;
   if (millis() - lastFlushMs < LOG_FLUSH_MS) return;
@@ -1425,7 +1620,7 @@ bool logOpenNew(const char *prefix, uint16_t &nextIndex) {
   }
   if (nextIndex > MAX_FILE_INDEX) {
     Serial.print(prefix);
-    Serial.println(F(" file numbers are all used - copy the files off and clear the card."));
+    Serial.println(F(" numbers all used - copy the files off, clear the card."));
     logFileName[0] = 0;
     sdFault = true;
     return false;
@@ -1435,6 +1630,8 @@ bool logOpenNew(const char *prefix, uint16_t &nextIndex) {
   if (!logOpen) {
     logFileName[0] = 0;
     sdReady = false;                      // make the next attempt re-mount the card
+    sdFault = true;
+    soundStart(SND_ERROR);
     return false;
   }
   nextIndex++;                            // next file starts after this one
@@ -1479,48 +1676,11 @@ void logClose() {
 // Seconds, printed from the millisecond timestamp with integer maths.
 // float would be within its precision here, but this is exact, shorter
 // in program memory, and cannot round 12.999 to 13.000.
-// ---------------------------------------------------------------------
-//  FIXED-WIDTH FIELDS
-// ---------------------------------------------------------------------
-// Every field in the readings block is padded to a constant width, so a
-// row read in a text editor lines up under its heading.  Unpadded, a
-// settling row is "1,0.100,0.03708,,,,,,,SETTLING,..." and counting six
-// consecutive commas by eye to find which column you are in is exactly
-// the thing nobody should have to do.
-//
-// Numbers are right-aligned, text left-aligned, and the last column is
-// not padded so no line carries trailing whitespace.  Leading spaces in
-// front of a number are ignored by Excel and by every CSV parser, so the
-// file is still a plain CSV and still charts the same way.  The padding
-// on the two text columns does survive into the cell, which only matters
-// if someone writes an exact-match formula against them - TRIM() there.
-void blanks(uint8_t w) { while (w--) logFile.print(' '); }
-
-// Right-align a float with 'dec' decimals in a field 'w' wide.
-void padF(float v, uint8_t w, uint8_t dec) {
-  uint8_t n = dec + 2;                      // "0." plus the decimals
-  if (v < 0) n++;                           // the sign
-  long a = (long)fabs(v);                   // integer digits, integer maths
-  while (a >= 10) { n++; a /= 10; }
-  if (n < w) blanks(w - n);
-  logFile.print(v, dec);
-}
-
-// Right-align an unsigned value in a field 'w' wide.
-void padU(unsigned long v, uint8_t w) {
-  uint8_t n = 1;
-  unsigned long t = 10;
-  while (v >= t && n < 10) { n++; t *= 10; }
-  if (n < w) blanks(w - n);
-  logFile.print(v);
-}
-
-// 'w' right-aligns the WHOLE SECONDS part in w characters, which is what
-// makes the Time column line up: the fractional part is always three
-// digits but "0" and "600" are not the same width.  w = 0 for the
-// summary, where the field stands alone and padding would look wrong.
-void printSeconds(unsigned long ms, uint8_t w) {
-  if (w) padU(ms / 1000UL, w); else logFile.print(ms / 1000UL);
+// Write seconds with exactly three decimal places using integer maths.
+// CSV contains semantic values only; visual alignment belongs in the
+// spreadsheet viewer, not as leading/trailing whitespace in cell data.
+void printSeconds(unsigned long ms) {
+  logFile.print(ms / 1000UL);
   logFile.print('.');
   unsigned int r = (unsigned int)(ms % 1000UL);
   if (r < 100) logFile.print('0');
@@ -1536,29 +1696,33 @@ static const char CSV_FIXED[] PROGMEM =
   "MILLIVOLT MEASUREMENT AND ALARM SYSTEM\r\n"
   "Soil scan log\r\n"
   "\r\n"
-  "Parameter,Value\r\n"
+  "Parameter,Value\r\n";
+
+#if TEST_MODE
+static const char CSV_SOURCE[] PROGMEM =
+  "Data_Source,SIMULATED_TEST_MODE\r\n"
+  "Measurement_ADC,SIMULATED\r\n"
+  "Input_Mode,INTERNAL_TEST_GENERATOR\r\n"
+  "ADC_Gain,";
+#else
+static const char CSV_SOURCE[] PROGMEM =
+  "Data_Source,ADS1256_HARDWARE\r\n"
   "Measurement_ADC,ADS1256\r\n"
   "Input_Mode,AIN0-AIN1 differential\r\n"
   "ADC_Gain,";
+#endif
 
 static const char CSV_RULE[] PROGMEM =
   "Baseline_Method,Adaptive - only NORMAL readings update it\r\n";
 
-// The headings are padded to the same widths as the data beneath them.
-// Long names would have been self-documenting but would also have set
-// the column widths: "DifferenceFromBaseline_mV" is 25 characters to
-// hold 9 characters of number, and carrying that across every column
-// nearly tripled the file.  Short names plus the key line below cost a
-// third of that and read the same.
-// The five columns that hold nothing until scanning begins, as one
-// packed run: the same bytes as five blanks()+comma pairs, none of the
-// call sites.
-static const char CSV_GAP[] PROGMEM = "         ,         ,         ,         ,        ";
+// Five empty measurement fields before scanning begins.  Four commas
+// separate them; the caller writes the fifth delimiter before Phase.
+static const char CSV_GAP[] PROGMEM = ",,,,";
 
 static const char CSV_COLS[] PROGMEM =
   "\r\n[READINGS]\r\n"
-  "Point,   Time_s,Reading_mV,Baseline_mV,Thresh_mV, Lower_mV, Upper_mV,"
-  "  Diff_mV,Diff_pct,Phase            ,Classification,AbnRun,Alarm\r\n";
+  "Point,Time_s,Reading_mV,Baseline_mV,Thresh_mV,Lower_mV,Upper_mV,"
+  "Diff_mV,Diff_pct,Phase,Classification,AbnRun,Alarm\r\n";
 
 static const char LBLS[] PROGMEM =
   "File_Name\0"
@@ -1592,8 +1756,10 @@ static const char LBLS[] PROGMEM =
   "Last_Alarm_Point\0"
   "Maximum_Deviation_percent\0"
   "Maximum_Deviation_Point\0"
-  "Sample_Rate_Hz\0"
-  "Alarm_Direction\0";
+  "Nominal_Sample_Rate_Hz\0"
+  "Alarm_Direction\0"
+  "Saturated_Points\0"
+  "Minimum_Threshold_mV\0";
 
 // Walk the packed table to label n and write "Label,".  Fifty separate
 // print(F("Label,")) call sites cost about eight bytes each in code on
@@ -1612,15 +1778,17 @@ void logScanHeader() {
   // literal here would let the file certify a rule the firmware is not
   // running - which is the exact failure this version set out to fix.
   logFile.print((const __FlashStringHelper *)CSV_FIXED);
+  logFile.print((const __FlashStringHelper *)CSV_SOURCE);
   logFile.println(ADC_PGA, 0);
   lbl(31); logFile.println(1000UL / ADC_NOMINAL_MS);
   lbl(0);                 logFile.println(logFileName);
   lbl(1);          logFile.println(F(FIRMWARE_VERSION));
-  // Named for what it is.  An Arduino has no clock, so this is the day
-  // the program was compiled, NOT the day the scan was taken - and a
+  // Named for what it is.  An Arduino has no clock, so this is the fixed
+  // release-build date, NOT the day the scan was taken - and a
   // bare "firmware,v2.3 Sep 22 2026" invites exactly that mistake.
-  lbl(2);       logFile.println(F(__DATE__));
+  lbl(2);       logFile.println(F(FIRMWARE_BUILD_DATE));
   lbl(3);   logFile.println(scanPercent, 1);
+  lbl(34);  logFile.println(MIN_THRESHOLD_MV, MV_DECIMALS);
   lbl(32);
   logFile.println(ALARM_BOTH_DIRECTIONS ? F("Above and below") : F("Above only"));
   logFile.print((const __FlashStringHelper *)CSV_RULE);
@@ -1629,7 +1797,11 @@ void logScanHeader() {
   lbl(6);         logFile.println(BASELINE_WINDOW_MS / 1000.0, 1);
   lbl(7); logFile.println(ALARM_CONFIRM_POINTS);
   lbl(8);
+  #if TEST_MODE
+  logFile.println(F("SIMULATED"));
+  #else
   logFile.println(sysocalDone ? F("PASS") : F("FAIL"));
+  #endif
   logFile.print((const __FlashStringHelper *)CSV_COLS);
   logFlushChecked();
 }
@@ -1640,24 +1812,32 @@ void logScanHeader() {
 void printMv(Print &out, float mv) { out.print(mv, MV_DECIMALS); }
 
 void printAlarmRule(float percent) {
-  Serial.print(F("Alarm rule: outside baseline +/- ")); Serial.print(percent, 1); Serial.print(F(" %"));
-#if KNOB_ENABLED
-  Serial.print(F("  (knob position ")); Serial.print(knobPosition + 1); Serial.print(F(" of 3)"));
-#endif
-  if (baselineReady) {
+  Serial.print(ALARM_BOTH_DIRECTIONS ? F("Alarm rule: outside baseline +/- ")
+                                     : F("Alarm rule: above baseline + "));
+  Serial.print(percent, 1); Serial.print(F(" %"));
+  // Limits only while a scan is running.  After STOP, baselineReady is
+  // still true and baselineMv still holds the LAST scan's baseline, so
+  // printing limits then - e.g. when the knob is turned between scans -
+  // would quote numbers the next scan will never use.
+  if (baselineReady && recording()) {
     float thr, low, high;
-    alarmLimits(percent, thr, low, high);
-    Serial.print(F("  ->  alarm if reading < ")); printMv(Serial, low);
-    Serial.print(F(" mV or > "));                 printMv(Serial, high); Serial.print(F(" mV"));
+    alarmLimits(baselineMv, percent, thr, low, high);
+    if (ALARM_BOTH_DIRECTIONS) {
+      Serial.print(F("  ->  alarm if reading < ")); printMv(Serial, low);
+      Serial.print(F(" mV or > "));                 printMv(Serial, high);
+    } else {
+      Serial.print(F("  ->  alarm if reading > ")); printMv(Serial, high);
+    }
+    Serial.print(F(" mV"));
   }
   Serial.println();
 }
 
 void printHelp() {
-  Serial.println(F("D4 = START, D5 = STOP.  Serial: 1/3 START  2/4 STOP  s status"));
-  Serial.println(F("v version  r re-check ADC  c zero calibration  ? help"));
+  Serial.println(F("D4 START; D5 STOP / idle RE-ZERO."));
+  Serial.println(F("Serial: 1 start, 2 stop/re-zero, s status, c zero, r ADC, v version, ? help"));
 #if TEST_MODE
-  Serial.println(F("          a = toggle simulated buried object (test mode)"));
+  Serial.println(F("a: simulated anomaly OFF/+20/+60/+120 %."));
 #endif
 }
 
@@ -1669,48 +1849,35 @@ int freeRam() {
 }
 
 void printVersion() {
-  Serial.print(F("Firmware ")); Serial.print(F(FIRMWARE_VERSION));
-  Serial.print(F("  built ")); Serial.print(F(__DATE__));
-  Serial.print(F(" ")); Serial.println(F(__TIME__));
-  Serial.print(F("Free RAM: ")); Serial.print(freeRam()); Serial.println(F(" bytes"));
+  Serial.print(F("FW ")); Serial.print(F(FIRMWARE_VERSION));
+  Serial.print(' '); Serial.print(F(FIRMWARE_BUILD_DATE));
+  Serial.print(F("; RAM ")); Serial.println(freeRam());
 }
 
 void printStatus() {
-  // Terse by necessity: the CSV now carries the settings and the totals,
-  // so this only has to report LIVE state - what the file cannot tell
-  // you because it has not been written yet, or because there is no card.
-  Serial.print(F("state "));
+  // The CSV carries detailed totals; this is deliberately a compact live
+  // health line so the Uno retains enough flash for the safety checks.
+  Serial.print(F("State "));
   Serial.print(phase == CALIBRATING ? F("CAL") : phase == READY ? F("READY")
              : phase == SETTLING ? F("SETTLE") : phase == LEARNING ? F("LEARN")
                                                                    : F("SCAN"));
-  Serial.print(F("  pts ")); Serial.print(sampleNumber);
-  Serial.print(F("  alarm ")); Serial.println(alarmActive ? F("ON") : F("off"));
-  Serial.print(F("last ")); printMv(Serial, lastReadingMv);
-  Serial.print(F(" mV   base "));
-  if (baselineReady) { printMv(Serial, baselineMv); Serial.print(F(" mV from ")); Serial.print(winCount); }
-  else Serial.print(F("none"));
-  Serial.println(baselineHeld ? F("  HELD") : F(""));
-  printAlarmRule(phase == SCANNING ? scanPercent : knobAlarmPercent());
-  Serial.print(F("adc "));
+  Serial.print(F("; pts ")); Serial.print(sampleNumber);
+  Serial.print(F("; alarm ")); Serial.print(alarmActive ? F("ON") : F("off"));
+  Serial.print(F("; ADC "));
 #if TEST_MODE
   Serial.print(F("SIM"));
 #else
-  Serial.print(adcOk ? F("ok") : F("FAIL"));
+  if (inputFault) Serial.print(F("SAT"));
+  else Serial.print(adcOk ? F("ok") : F("FAIL"));
 #endif
-  Serial.print(F("  zerocal "));
-  Serial.print(sysocalDone ? F("ok") : sysocalLost ? F("LOST - type c") : F("NEEDED - type c"));
-  Serial.print(F("  relay "));
-  Serial.println(relayClosed ? F("CLOSED") : F("open"));
-  Serial.print(F("sd "));
+  Serial.print(F("; zero ")); Serial.print(sysocalDone ? F("ok") : F("FAIL"));
+  Serial.print(F("; SD "));
   if (sdFault)       Serial.print(F("FAULT"));
   else if (!sdReady) Serial.print(F("none"));
   else if (logOpen)  Serial.print(logFileName);
   else               Serial.print(F("ok"));
-  Serial.print(F("  dropped ")); Serial.print(droppedTotal);
-  Serial.print(F("  sat ")); Serial.print(saturatedCount);
-  Serial.print(F("  restarts ")); Serial.println(adcResets);
-  Serial.print(F("up ")); Serial.print(millis() / 1000);
-  Serial.print(F(" s  ram ")); Serial.println(freeRam());
+  Serial.print(F("; drop/sat ")); Serial.print(droppedTotal);
+  Serial.print('/'); Serial.println(saturatedTotal);
 }
 
 // Classification of one reading
@@ -1741,42 +1908,38 @@ void logScanRow(unsigned long n, unsigned long tms, float mv, float base,
 
   if (!logOpen) return;
 
-  // Widths match the headings in CSV_COLS exactly.  If one changes, the
-  // other must change with it - that is the whole point of the block.
-  padU(n, 5);                              logFile.print(',');
-  printSeconds(tms, 5);                    logFile.print(',');
-  padF(mv, 10, MV_DECIMALS);               logFile.print(',');
+  logFile.print(n);                         logFile.print(',');
+  printSeconds(tms);                        logFile.print(',');
+  logFile.print(mv, MV_DECIMALS);           logFile.print(',');
 
   // A column is written only where it means something, and left BLANK
   // otherwise.  Writing 0.00000 for a limit that does not exist yet is
   // not a placeholder - it is a wrong number, and charting it drags the
   // axis to zero and flattens the whole scan.
-  if (ph == PH_SETTLE) blanks(11); else padF(base, 11, MV_DECIMALS);
+  if (ph != PH_SETTLE) logFile.print(base, MV_DECIMALS);
   logFile.print(',');
   if (ph == PH_SCAN) {
     float diff = mv - base;
-    padF(thr,        9, MV_DECIMALS);  logFile.print(',');
-    padF(base - thr, 9, MV_DECIMALS);  logFile.print(',');
-    padF(base + thr, 9, MV_DECIMALS);  logFile.print(',');
-    padF(diff,       9, MV_DECIMALS);  logFile.print(',');
-    padF((fabs(base) > 1e-9) ? (diff / fabs(base)) * 100.0 : 0.0, 8, 1);
+    logFile.print(thr, MV_DECIMALS);           logFile.print(',');
+    if (ALARM_BOTH_DIRECTIONS) logFile.print(base - thr, MV_DECIMALS);
+    logFile.print(',');
+    logFile.print(base + thr, MV_DECIMALS);    logFile.print(',');
+    logFile.print(diff, MV_DECIMALS);          logFile.print(',');
+    // A percentage relative to zero is undefined, not 0 %.  Leave the
+    // cell empty so spreadsheet software cannot mistake it for data.
+    if (fabs(base) > 1e-9) logFile.print((diff / fabs(base)) * 100.0, 1);
   } else {
     logFile.print((const __FlashStringHelper *)CSV_GAP);
   }
   logFile.print(',');
-  // The two text columns are padded with counts known at compile time.
-  // Measuring the string at run time meant strlen_P, and a libc call to
-  // learn something the compiler already knows is a poor trade at 99 %
-  // of flash.  SETTLING and SCANNING are 8 and BASELINE_LEARNING is 17,
-  // so the field is 17;  NOT_EVALUATED 13, ABNORMAL 8, NORMAL 6 -> 14.
   if (ph == PH_LEARN) logFile.print(F("BASELINE_LEARNING"));
-  else { logFile.print(ph == PH_SETTLE ? F("SETTLING") : F("SCANNING")); blanks(9); }
+  else logFile.print(ph == PH_SETTLE ? F("SETTLING") : F("SCANNING"));
   logFile.print(',');
-  if (ph != PH_SCAN) { logFile.print(F("NOT_EVALUATED")); blanks(1); }
-  else if (abnormal) { logFile.print(F("ABNORMAL"));      blanks(6); }
-  else               { logFile.print(F("NORMAL"));        blanks(8); }
+  if (ph != PH_SCAN) logFile.print(F("NOT_EVALUATED"));
+  else if (abnormal) logFile.print(F("ABNORMAL"));
+  else               logFile.print(F("NORMAL"));
   logFile.print(',');
-  padU(run, 6);                            logFile.print(',');
+  logFile.print(run);                       logFile.print(',');
   logFile.println(alarm ? F("YES") : F("NO"));
   // NOT flushed here.  See logFlushIfDue(): flushing ten times a second
   // is what would finally make the unit miss conversions.
@@ -1816,6 +1979,7 @@ void startScanClock() {
   phaseStartMs  = millis();
   sampleNumber  = 0;
   droppedPoints = 0;
+  saturatedPoints = 0;
   lastFlushMs   = millis();
   statsReset(baseStats);
   statsReset(scanStats);
@@ -1823,8 +1987,19 @@ void startScanClock() {
 }
 
 // =====================================================================
-//  THE FOUR ACTIONS  (called by the buttons AND by Serial commands)
+//  SCAN START/STOP ACTIONS  (called by the buttons and Serial commands)
 // =====================================================================
+const __FlashStringHelper *scanStatusText() {
+  switch (scanStatus) {
+    case SCAN_COMPLETE:    return F("COMPLETE");
+    case SCAN_ADC_FAULT:   return F("VOID_ADC_FAULT");
+    case SCAN_EARLY_STOP:  return F("INCOMPLETE_EARLY_STOP");
+    case SCAN_INPUT_FAULT: return F("VOID_INPUT_FAULT");
+    case SCAN_SD_FAULT:    return F("VOID_SD_FAULT");
+    default:               return F("RUNNING");
+  }
+}
+
 void finishScanFile() {
   if (!logOpen) return;
   logFile.println();
@@ -1834,9 +2009,8 @@ void finishScanFile() {
   // line only when something went wrong, so a good file said nothing
   // about itself and you had to infer health from an absence.
   lbl(9);
-  logFile.println(scanStatus == SCAN_ADC_RESET ? F("VOID_ADC_RESET")
-                                               : F("COMPLETE"));
-  lbl(10);    printSeconds(millis() - phaseStartMs, 0);
+  logFile.println(scanStatusText());
+  lbl(10);    printSeconds(millis() - phaseStartMs);
   logFile.println();
   // Counted by phase.  One "normal_points" covering both the learning
   // readings and the judged ones meant two different things at once.
@@ -1848,12 +2022,15 @@ void finishScanFile() {
   lbl(16);             logFile.println(alarmEvents);
   lbl(17);             logFile.println(alarmPoints);
   lbl(18);           logFile.println(droppedPoints);
+  lbl(33);         logFile.println(saturatedPoints);
   logFile.println();
 
   // How much the definition of "normal" moved while the operator walked.
-  lbl(19);      logFile.println(initialBaselineMv, MV_DECIMALS);
-  lbl(20);        logFile.println(baselineMv, MV_DECIMALS);
-  lbl(21);       logFile.println(baselineMv - initialBaselineMv, MV_DECIMALS);
+  if (baselineReady) {
+    lbl(19);      logFile.println(initialBaselineMv, MV_DECIMALS);
+    lbl(20);        logFile.println(baselineMv, MV_DECIMALS);
+    lbl(21);       logFile.println(baselineMv - initialBaselineMv, MV_DECIMALS);
+  }
   // If the antenna was waved about during learning, the spread says so.
   // Logged, not rejected - there is not enough real antenna data yet to
   // know where a limit belongs.
@@ -1872,12 +2049,14 @@ void finishScanFile() {
   logFile.println();
 
   // Where to look in the graph, not just how big it was.
-  lbl(26);      logFile.println(maxAbsDelta, MV_DECIMALS);
-  lbl(29); logFile.println(maxDeltaPct, 1);
-  lbl(30);   logFile.println(maxDeltaPoint);
-  if (alarmPoints) {
-    lbl(27); logFile.println(firstAlarmPoint);
-    lbl(28);  logFile.println(lastAlarmPoint);
+  if (scanStats.n) {
+    lbl(26);      logFile.println(maxAbsDelta, MV_DECIMALS);
+    if (maxDeltaPctValid) { lbl(29); logFile.println(maxDeltaPct, 1); }
+    lbl(30);   logFile.println(maxDeltaPoint);
+    if (alarmPoints) {
+      lbl(27); logFile.println(firstAlarmPoint);
+      lbl(28);  logFile.println(lastAlarmPoint);
+    }
   }
   logClose();
 }
@@ -1885,8 +2064,13 @@ void finishScanFile() {
 // Refuse to record anything while the converter is not answering: a file
 // full of zeros looks like data and is worse than no file at all.
 bool adcUsable() {
-  if (adcOk) return true;
-  Serial.println(F("ADS1256 not responding - nothing would be measured. Check the wiring, then try again."));
+  if (adcOk && !inputFault) return true;
+  if (inputFault) {
+    Serial.println(F("ADC input at full scale - scan refused. Check antenna/bias wiring."));
+    soundStart(SND_ERROR);
+    return false;
+  }
+  Serial.println(F("ADS1256 not responding - scan refused. Check the wiring."));
   soundStart(SND_ERROR);
   return false;
 }
@@ -1895,23 +2079,39 @@ bool adcUsable() {
 // point counter back to 1, a fresh baseline learned from its own first
 // readings.  Nothing is carried over from the previous scan.
 void actionStartScan() {
-  if (recording()) { Serial.println(F("(Already scanning.)")); return; }
+  if (recording()) { Serial.println(F("Already scanning.")); return; }
+
+  // Acknowledge an idle START before doing anything that can take time.
+  // This matters in a sealed, stand-alone instrument: the operator should
+  // never have to wonder whether the button contact was recognised.
+  soundPlayBlocking(SND_CLICK);
+
   if (!adcUsable()) return;
-  // A precision scan is meaningless without a valid zero.  v2.1 tested
-  // sysocalLost, which only catches a calibration that existed and was
-  // then wiped.  A START-UP calibration that never succeeded - relay
-  // stuck, DRDY lost, sanity check failed - leaves sysocalDone false AND
-  // sysocalLost false, and v2.1 would have let the scan begin.  Test the
-  // thing that actually matters instead.
-  if (!sysocalDone) {
-    Serial.println(sysocalLost ? F("Zero calibration LOST - scan refused.")
-                               : F("No valid zero calibration - scan refused."));
-    Serial.println(F("Type c to run it, or power-cycle the unit."));
+
+  // Check the required card before making the operator wait through a
+  // five-second calibration retry.  logOpenNew() still performs the real
+  // file-create check below.
+  if (REQUIRE_SD_FOR_SCAN && !sdStart()) {
+    Serial.println(F("START BLOCKED: SD card unavailable."));
     soundStart(SND_ERROR);
     return;
   }
 
-  phase           = SETTLING;
+  // A precision scan is meaningless without a valid zero, but a marginal
+  // power-on check can succeed after the analogue path has warmed and
+  // settled.  START therefore makes one safe, visible retry and continues
+  // directly into the scan if it succeeds; no Serial command or second
+  // button press is required.
+  if (!sysocalDone) {
+    Serial.println(F("START: retrying zero calibration."));
+    if (!automaticZeroCalibration()) {
+      Serial.println(F("START BLOCKED: zero calibration failed."));
+      // Every false return from automaticZeroCalibration() has already
+      // started SND_ERROR.  Do not turn one fault into two error patterns.
+      return;
+    }
+  }
+
   alarmActive     = false;
   scanStatus      = SCAN_RUNNING;
   abnormalRun     = 0;
@@ -1925,48 +2125,81 @@ void actionStartScan() {
   initialBaselineMv = 0.0;
   maxAbsDelta     = 0.0;
   maxDeltaPct     = 0.0;
+  maxDeltaPctValid = false;
   maxDeltaPoint   = 0;
-  scanPercent     = knobAlarmPercent();     // latched, so file and rows agree
+#if KNOB_ENABLED
+  knobUpdate();                             // one last look, same deadband as the display
+#endif
+  scanPercent     = knobAlarmPercent();     // FROZEN for this scan: file and rows agree
   digitalWrite(PIN_LED_RED, LOW);
 
-  Serial.println(F("---- SCAN STARTED ----"));
-  Serial.print(F("Settling, then learning the baseline for "));
-  Serial.print(INITIAL_LEARNING_MS / 1000);
-  Serial.println(F(" s - no alarm until then."));
-  if (logOpenNew("SCAN", nextScanIndex)) {
+  bool haveLog = logOpenNew("SCAN", nextScanIndex);
+  if (haveLog) {
     logScanHeader();
-    Serial.print(F("Logging to ")); Serial.println(logFileName);
-  } else {
-    Serial.println(F("(no SD card - Serial only)"));
+    haveLog = logOpen;                  // header flush can expose a write fault
   }
-  soundStart(SND_SCAN_START);
+  if (!haveLog && REQUIRE_SD_FOR_SCAN) {
+    Serial.println(F("Scan refused: SD unavailable. Power off; check card."));
+    soundStart(SND_ERROR);
+    return;
+  }
+
+#if !TEST_MODE
+  // Remove any conversion that completed while the filename/header was
+  // being written.  The next DRDY edge is then point 1 after time zero.
+  if (!adsDiscardConversions(1)) {
+    adcOk = false;
+    phase = SETTLING;
+    startScanClock();
+    scanStatus = SCAN_ADC_FAULT;
+    actionStopScan();
+    return;
+  }
+  drdyArmed = false;                  // require a new HIGH -> LOW readiness cycle
+  lastConversionMs = millis();
+#endif
+
+  phase = SETTLING;
   startScanClock();
+  Serial.println(F("SCAN START: settle, learn baseline, then arm."));
+  if (haveLog) { Serial.print(F("Logging to ")); Serial.println(logFileName); }
+  else Serial.println(F("(Serial only - SD requirement disabled)"));
+  soundStart(SND_SCAN_START);
+  printAlarmRule(scanPercent);    // the percentage this scan is frozen at
 }
 
 void actionStopScan() {
   if (!recording()) {
-    Serial.println(F("(Nothing to stop - press START to begin a scan.)"));
+    Serial.println(F("Idle STOP: re-zeroing."));
+    actionSystemZeroCalibrate();
     return;
+  }
+  if (scanStatus == SCAN_RUNNING) {
+    scanStatus = (baselineReady && phase == SCANNING) ? SCAN_COMPLETE : SCAN_EARLY_STOP;
   }
   phase       = READY;
   alarmActive = false;
   abnormalRun = 0;
-  if (scanStatus == SCAN_RUNNING) scanStatus = SCAN_COMPLETE;
 
-  Serial.println(F("---- SCAN COMPLETE ----"));
-  Serial.print(F("Points  : ")); Serial.print(sampleNumber);
-  Serial.print(F("  settle ")); Serial.print(settlingPoints);
-  Serial.print(F("  learn "));  Serial.print(learningPoints);
-  Serial.print(F("  scan "));   Serial.println(scanNormal + scanAbnormal);
-  Serial.print(F("Abnormal: ")); Serial.print(scanAbnormal);
-  Serial.print(F("  alarm events ")); Serial.println(alarmEvents);
-  Serial.print(F("Baseline: ")); printMv(Serial, initialBaselineMv);
-  Serial.print(F(" -> "));       printMv(Serial, baselineMv); Serial.println(F(" mV"));
+  Serial.print(F("Points ")); Serial.println(sampleNumber);
+  if (baselineReady) {
+    Serial.print(F("Baseline: ")); printMv(Serial, initialBaselineMv);
+    Serial.print(F(" -> "));       printMv(Serial, baselineMv); Serial.println(F(" mV"));
+  } else {
+    Serial.println(F("Baseline not established."));
+  }
   if (droppedPoints) { Serial.print(F("Dropped : ")); Serial.println(droppedPoints); }
+  if (saturatedPoints) { Serial.print(F("Saturated: ")); Serial.println(saturatedPoints); }
   finishScanFile();
-  if (logFileName[0]) { Serial.print(F("File           : ")); Serial.println(logFileName); }
-  Serial.println(F("READY. START begins a new scan with a fresh baseline."));
-  soundStart(SND_SCAN_STOP);
+  Serial.print(F("SCAN ")); Serial.println(scanStatusText());
+  if (logFileName[0]) { Serial.print(F("File    : ")); Serial.println(logFileName); }
+  if (scanStatus == SCAN_COMPLETE || scanStatus == SCAN_EARLY_STOP) {
+    Serial.println(F("READY."));
+    soundStart(SND_SCAN_STOP);
+  } else {
+    Serial.println(F("FAULT: correct it before a new scan."));
+    soundStart(SND_ERROR);
+  }
 }
 
 // =====================================================================
@@ -1994,7 +2227,7 @@ void invalidateSystemZeroCalibration() {
   // containing two different instruments.
   if (recording()) {
     Serial.println(F("*** ADS1256 re-initialised DURING A SCAN - this scan is VOID. ***"));
-    scanStatus = SCAN_ADC_RESET;
+    scanStatus = SCAN_ADC_FAULT;
     actionStopScan();
   } else if (had) {
     Serial.println(F("*** ADS1256 re-initialised - zero calibration no longer valid. ***"));
@@ -2082,14 +2315,11 @@ bool doZeroCalibration() {
     Serial.println(F("*** Could not verify the new zero - calibration REFUSED. ***"));
     return calibrationRefused();
   }
-  if (ofcAfter == ofcBefore) {
-    // After a SELFCAL the offset register holds the converter's own zero;
-    // a SYSOCAL that landed essentially cannot reproduce the same 24-bit
-    // value.  Identical means the write did not happen.
-    Serial.println(F("*** OFC unchanged - the ADS1256 did not accept it. REFUSED. ***"));
+  if (fabs(zeroAfter) > CAL_VERIFY_MV) {
+    Serial.print(F("*** Residual zero exceeds ")); printMv(Serial, CAL_VERIFY_MV);
+    Serial.println(F(" mV - calibration REFUSED. ***"));
     return calibrationRefused();
   }
-
   Serial.print(F("Removed: ")); printMv(Serial, zeroBefore - zeroAfter);
   Serial.println(F(" mV"));
   sysocalZeroBefore = zeroBefore;
@@ -2175,9 +2405,11 @@ bool automaticZeroCalibration() {
   // contact is the one failure with no other symptom - the unit would
   // read a flat ~0 uV for ever behind a solid green LED - and firmware
   // cannot tell a stuck relay from a genuinely quiet antenna, so this
-  // reports the number rather than judging it.  The judgement happens
-  // where there IS something to judge against: the learning period below
-  // aborts the scan outright if the ground baseline comes out near zero.
+  // reports the number rather than judging it.  (Up to v2.4 the learning
+  // period then aborted any scan whose baseline came out near zero; v2.5
+  // removed that so genuinely tiny baselines can be scanned, which leaves
+  // this number and a near-zero baseline in the CSV as the signs of a
+  // welded relay.)
   float openMv;
   Serial.print(F("Relay OPEN, input "));
   if (adsAverageBlocking(SYSOCAL_AVG_POINTS, openMv)) printMv(Serial, openMv);
@@ -2187,6 +2419,7 @@ bool automaticZeroCalibration() {
   // The blocking reads above left a long gap since the last conversion,
   // which updateAdcHealth() would otherwise read as a dead converter.
   lastConversionMs = millis();
+  drdyArmed = false;
   lastIdlePrintMs  = millis();
   phase = savedPhase;
   return ok;
@@ -2224,7 +2457,7 @@ void runStartupCalibration() {
   if (sysocalDone) {
     Serial.println(F("READY. Hold the antenna over ordinary ground, then press START."));
   } else {
-    Serial.println(F("NOT READY - zero calibration failed. Fix the fault, then type c."));
+    Serial.println(F("NOT READY - zero calibration failed. START will retry it."));
     soundStart(SND_ERROR);
   }
 }
@@ -2233,9 +2466,10 @@ void runStartupCalibration() {
 //  SETUP
 // =====================================================================
 void setup() {
-  // Remember why the board started, then take the watchdog out of the
-  // way until we are ready to arm it.
-  resetCause = MCUSR;
+  // Optiboot clears MCUSR before the sketch starts, so the application
+  // cannot reliably report a hardware reset cause on a standard Uno.
+  // A recording without a complete [SUMMARY] is the durable evidence of
+  // any reset or power loss that interrupted a scan.
   MCUSR = 0;
   wdt_disable();
 
@@ -2271,17 +2505,16 @@ void setup() {
   Serial.begin(SERIAL_BAUD);
   delay(200);
   Serial.println();
-  Serial.println(F("=================================="));
-  Serial.print(F(" Millivolt Measurement & Alarm  "));
-  Serial.println(F(FIRMWARE_VERSION));
-  Serial.println(F("=================================="));
+  // One title line: printVersion() straight after it gives the version,
+  // so repeating it between two rules of '=' only cost flash (v2.8).
+  Serial.println(F("==== Millivolt Measurement & Alarm ===="));
   printVersion();
-  if (resetCause & _BV(WDRF)) {
-    Serial.println(F("*** Watchdog restarted the unit - the last recording ended early."));
-  }
   // The settings all go into every CSV header now, so the banner only
   // states the rule the operator is about to rely on.
-  Serial.print(F("Alarm: baseline +/- ")); Serial.print(ALARM_PERCENT, 1);
+#if KNOB_ENABLED
+  knobUpdate();                 // before anything asks what the knob says
+#endif
+  Serial.print(F("Alarm: baseline +/- ")); Serial.print(knobAlarmPercent(), 1);
   Serial.print(F(" %, ")); Serial.print(ALARM_BOTH_DIRECTIONS ? F("either way") : F("above only"));
   Serial.print(F(", ")); Serial.print(ALARM_CONFIRM_POINTS); Serial.println(F(" to confirm"));
 #if TEST_MODE
@@ -2301,9 +2534,9 @@ void setup() {
 
   // ---- SD card ----
   if (sdStart()) {
-    Serial.println(F("SD card OK - one file per scan (SCANxxxx.CSV)."));
+    Serial.println(F("SD OK; files are SCANxxxx.CSV."));
   } else {
-    Serial.println(F("No SD card - Serial only. Switch OFF to fit one."));
+    Serial.println(F("SD missing. Switch OFF before fitting one."));
   }
   watchdogKick();
 
@@ -2313,20 +2546,15 @@ void setup() {
 #else
   adcOk = adsInitialise(false);
   if (adcOk) {
-    Serial.println(F("ADS1256 OK (PGA 64, 10 SPS, buffer on, AIN0-AIN1)"));
+    Serial.println(F("ADS1256 OK: PGA64, 10 SPS, buffer on."));
   } else {
-    Serial.println(F("ERROR: ADS1256 not responding. Check 5V/GND, DIN/DOUT/SCLK/CS/DRDY."));
-    Serial.println(F("Still running; re-checking every 2 s."));
+    Serial.println(F("ADS1256 FAIL: check power and SPI wiring."));
     soundStart(SND_ERROR);
   }
   adcRetryMs = millis();
 #endif
 
   printHelp();
-#if KNOB_ENABLED
-  knobPosition = 0;
-  readKnobPosition();
-#endif
   runStartupCalibration();
   lastConversionMs = millis();
 }
@@ -2349,18 +2577,46 @@ bool adcPoll(float &mv) {
   lastFakeMs = millis();
   float drift = 0.001 * sin(millis() / 30000.0);
   float noise = random(-8, 9) / 10000.0;
-  bool anomaly = (phase == SCANNING) && simulatedAnomaly;
-  anomalyLevel += ((anomaly ? 0.012 : 0.0) - anomalyLevel) * 0.15;
+  float anomalyTarget = 0.0;
+  if (phase == SCANNING) {
+    if      (simulatedAnomalyLevel == 1) anomalyTarget = 0.072 * 0.20;
+    else if (simulatedAnomalyLevel == 2) anomalyTarget = 0.072 * 0.60;
+    else if (simulatedAnomalyLevel == 3) anomalyTarget = 0.072 * 1.20;
+  }
+  anomalyLevel += (anomalyTarget - anomalyLevel) * 0.15;
   mv = 0.072 + drift + noise + anomalyLevel;
   lastConversionMs = millis();
   return true;
 #else
   if (!adcOk) return false;
-  if (digitalRead(PIN_ADC_DRDY) != LOW) return false;
+  // One conversion requires one complete DRDY HIGH -> LOW cycle.  Without
+  // this gate a DRDY wire shorted to ground would be mistaken for fresh
+  // data and the same result register could be logged at loop speed.
+  if (digitalRead(PIN_ADC_DRDY) != LOW) {
+    drdyArmed = true;
+    return false;
+  }
+  if (!drdyArmed) return false;
+  drdyArmed = false;
 
   unsigned long now  = millis();
   unsigned long gap  = now - lastConversionMs;
   long counts = adsReadConversion();
+  // RDATA raises DRDY after the 24 data bits.  Re-arm here so a slow SD
+  // write cannot hide the brief HIGH interval before the next conversion.
+  // A wire held LOW is an immediate protocol fault; its count is rejected.
+  drdyArmed = (digitalRead(PIN_ADC_DRDY) == HIGH);
+  if (!drdyArmed) {
+    adcOk = false;
+    adcRetryMs = millis();
+    Serial.println(F("*** DRDY stayed LOW after RDATA - ADC fault. ***"));
+    soundStart(SND_ERROR);
+    if (recording()) {
+      scanStatus = SCAN_ADC_FAULT;
+      actionStopScan();
+    }
+    return false;
+  }
   lastConversionMs = now;
 
   // If the program was away for longer than one conversion period, the
@@ -2379,12 +2635,27 @@ bool adcPoll(float &mv) {
 
   if (counts >= ADC_SATURATED_COUNTS || counts <= -ADC_SATURATED_COUNTS) {
     // The input is at the end stop: +/-78 mV differential at PGA 64.
-    // Almost always an unplugged antenna or a wiring fault.
-    if (saturatedCount == 0) {
+    // Almost always an unplugged antenna or a wiring fault.  A saturated
+    // value is NEVER allowed into baseline learning or scan statistics.
+    if (saturationRun == 0) {
       Serial.println(F("WARNING: ADC input at full scale - check the antenna and the bias point."));
     }
-    saturatedCount++;
+    if (saturationRun < 255) saturationRun++;
+    saturatedTotal++;
+    if (recording()) saturatedPoints++;
+    if (!inputFault && saturationRun >= ADC_SATURATION_CONFIRM_POINTS) {
+      inputFault = true;
+      Serial.println(F("*** ADC input fault confirmed - full-scale readings persisted. ***"));
+      soundStart(SND_ERROR);
+      if (recording()) {
+        scanStatus = SCAN_INPUT_FAULT;
+        actionStopScan();
+      }
+    }
+    return false;
   }
+  saturationRun = 0;
+  inputFault = false;
   mv = adsCountsToMillivolts(counts);
   return true;
 #endif
@@ -2402,6 +2673,12 @@ void updateAdcHealth() {
       adcRetryMs = millis();
       Serial.println(F("*** ADS1256 stopped sending conversions - re-checking it. ***"));
       soundStart(SND_ERROR);
+      // Void immediately.  Waiting for the later recovery attempt left a
+      // window in which STOP could incorrectly label the file COMPLETE.
+      if (recording()) {
+        scanStatus = SCAN_ADC_FAULT;
+        actionStopScan();
+      }
     }
     return;
   }
@@ -2423,8 +2700,14 @@ void updateAdcHealth() {
     // stopped by invalidateSystemZeroCalibration(), so blocking here for
     // the settle is safe, and the operator must press START again.
     automaticZeroCalibration();
-    Serial.println(sysocalDone ? F("Measurement restored.") : F("Type c before scanning."));
-    soundStart(SND_CLICK);
+    if (sysocalDone) {
+      Serial.println(F("Measurement restored."));
+      soundStart(SND_CLICK);
+    } else {
+      // automaticZeroCalibration() already started the error pattern.  Do
+      // not overwrite it with a success-like click after a failed recovery.
+      Serial.println(F("START will retry zero."));
+    }
   }
 #endif
 }
@@ -2461,8 +2744,12 @@ void handleSerialCommands() {
       case '?': case 'h': case 'H': printHelp(); break;
 #if TEST_MODE
       case 'a': case 'A':
-        simulatedAnomaly = !simulatedAnomaly;
-        Serial.print(F("Simulated buried object: ")); Serial.println(simulatedAnomaly ? F("ON") : F("off"));
+        simulatedAnomalyLevel = (uint8_t)((simulatedAnomalyLevel + 1) % 4);
+        Serial.print(F("Simulated anomaly: "));
+        if      (simulatedAnomalyLevel == 1) Serial.println(F("+20 %"));
+        else if (simulatedAnomalyLevel == 2) Serial.println(F("+60 %"));
+        else if (simulatedAnomalyLevel == 3) Serial.println(F("+120 %"));
+        else                                 Serial.println(F("OFF"));
         break;
 #endif
       default: break;   // ignore newlines and anything else
@@ -2478,6 +2765,15 @@ void handlePoint(float mv) {
   lastReadingMv = mv;
 
   if (!recording()) {
+#if KNOB_ENABLED
+    // The knob, idle only.  Here rather than on a timer of its own
+    // because the conversions already arrive ten times a second, and
+    // this is the moment with ~95 ms of slack before the next one.  A
+    // scan has frozen its percentage, so during one there is nothing to
+    // read and the scan path stays exactly as it was bench-proven.  A
+    // knob turned during a scan is reported on the first point after STOP.
+    if (knobUpdate()) printAlarmRule(knobAlarmPercent());
+#endif
     // READY or CALIBRATING: a live reading every 2 s, so the bench
     // operator can see the unit working without starting a scan.
     if (now - lastIdlePrintMs >= IDLE_PRINT_MS) {
@@ -2546,7 +2842,7 @@ void handlePoint(float mv) {
 
   float usedBase = baselineMv;
   float thr, low, high;
-  alarmLimits(scanPercent, thr, low, high);
+  alarmLimits(usedBase, scanPercent, thr, low, high);
 
   // NORMAL is  low <= reading <= high,  so a reading exactly on a limit
   // counts as normal.
@@ -2573,10 +2869,11 @@ void handlePoint(float mv) {
     lastAlarmPoint = sampleNumber;
   }
   float delta = mv - usedBase;
-  if (fabs(delta) > maxAbsDelta) {
+  if (scanStats.n == 1 || fabs(delta) > maxAbsDelta) {
     maxAbsDelta   = fabs(delta);
     maxDeltaPoint = sampleNumber;   // a size with no location cannot be looked up
-    maxDeltaPct   = (fabs(usedBase) > 1e-9) ? (delta / fabs(usedBase)) * 100.0 : 0.0;
+    maxDeltaPctValid = (fabs(usedBase) > 1e-9);
+    if (maxDeltaPctValid) maxDeltaPct = (fabs(delta) / fabs(usedBase)) * 100.0;
   }
 
   logScanRow(sampleNumber, tms, mv, usedBase, thr, PH_SCAN, abnormal, abnormalRun, alarm);
@@ -2605,16 +2902,6 @@ void loop() {
   updateBuzzer();
   updateLeds();
   handleSerialCommands();
-
-#if KNOB_ENABLED
-  // ---- knob: report changes (they take effect at the next START) ----
-  uint8_t before = knobPosition;
-  readKnobPosition();
-  if (knobPosition != before) {
-    printAlarmRule(knobAlarmPercent());
-    if (recording()) Serial.println(F("(This scan keeps the percentage it started with.)"));
-  }
-#endif
 
   // ---- buttons ----
   if (buttonWasPressed(btnStart)) actionStartScan();
