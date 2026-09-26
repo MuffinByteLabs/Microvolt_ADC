@@ -6,17 +6,17 @@ The current sketch is [firmware/Millivolt_Monitor/Millivolt_Monitor.ino](firmwar
 
 ## Firmware progression
 
-| Snapshot | Main change |
-| --- | --- |
-| v1.1 | Initial Uno, ADS1256, alarm and logging prototype |
-| v1.2 | Confirmed ±10% alarm rule and separate baseline/scan CSV logs |
-| v2.7 | Later acquisition and logging implementation |
-| v3.0 | ADC and SD fault handling, startup calibration checks and scan outcomes |
-| v3.1 | Button controlled 10%, 50% and 100% alarm thresholds |
-| v3.2 | Shorter, lower pitched feedback tones |
-| v3.3 | Checked SD writes and close, fault latching, scan/ready LED patterns and STOP handling |
+| Snapshot | Recorded day (2026) | Main change |
+| --- | --- | --- |
+| v1.1 | September 16 | Initial Uno, ADS1256, alarm and logging prototype |
+| v1.2 | September 18 | Confirmed ±10% alarm rule and separate baseline/scan CSV logs |
+| v2.7 | September 22 | Later acquisition and logging implementation |
+| v3.0 | September 23 | ADC and SD fault handling, startup calibration checks and scan outcomes |
+| v3.1 | September 25 | Button controlled 10%, 50% and 100% alarm thresholds |
+| v3.2 | September 25 | Shorter, lower pitched feedback tones |
+| v3.3 | September 25 | Checked SD writes and close, fault latching, scan/ready LED patterns and STOP handling |
 
-These commits **import existing source snapshots**. Their Git dates show the import date, not when the original development occurred. The version names identify the saved firmware revisions. This public repository excludes client originals, correspondence, and field measurements.
+These commits **import existing source snapshots**; the repository was first populated on September 25, 2026. Historical author dates were reconstructed from the archived engineering record for v1.1 and v1.2, the archived file modification timestamp for v2.7, and the firmware changelog for v3.0. The v2.7 timestamp is file metadata, not an independently verified release date. Where only a day is recorded, noon Eastern is a placeholder time. Committer dates record the import or reconstruction, and the original day-by-day Git activity was not preserved. September 25 author dates remain unchanged for the later snapshots and tooling. This public repository excludes client originals, correspondence, and field measurements.
 
 ## Build and checks
 
