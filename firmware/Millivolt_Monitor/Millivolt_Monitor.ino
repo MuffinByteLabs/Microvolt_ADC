@@ -1,6 +1,6 @@
 /*
   =====================================================================
-   MILLIVOLT MEASUREMENT AND ALARM SYSTEM                      v3.1
+   MILLIVOLT MEASUREMENT AND ALARM SYSTEM                      v3.2
    Arduino UNO R3  +  ADS1256 24-bit ADC  +  microSD logging
   =====================================================================
 
@@ -605,7 +605,7 @@
 #include <SD.h>
 #include <avr/wdt.h>
 
-#define FIRMWARE_VERSION "v3.1"
+#define FIRMWARE_VERSION "v3.2"
 #define FIRMWARE_BUILD_DATE "25 Sep 2026"
 
 // =====================================================================
@@ -918,13 +918,15 @@ void relayClose() {
 //  BUZZER  (one non-blocking engine; works for active and passive
 //  buzzers, either trigger level)
 // =====================================================================
-const Note SND_POWER_ON[]   PROGMEM = {{1500, 80}, {0, 40}, {2000, 80}, {0, 40}, {2500, 120}, {0, 0}};
+// Brief, lower-pitched cues are less intrusive on the installed passive
+// buzzer module.  The alarm and scan cues retain their original sound.
+const Note SND_POWER_ON[]   PROGMEM = {{1050, 40}, {0, 55}, {1250, 40}, {0, 55}, {1450, 55}, {0, 0}};
 const Note SND_CLICK[]      PROGMEM = {{2000, 35}, {0, 0}};
-const Note SND_THRESHOLD_10[]  PROGMEM = {{1700, 70}, {0, 0}};
-const Note SND_THRESHOLD_50[]  PROGMEM = {{1700, 70}, {0, 65}, {1700, 70}, {0, 0}};
-const Note SND_THRESHOLD_100[] PROGMEM = {{1700, 70}, {0, 65}, {1700, 70},
-                                          {0, 65}, {1700, 70}, {0, 0}};
-const Note SND_CAL_OK[]     PROGMEM = {{2500, 90}, {0, 70}, {2500, 90}, {0, 0}};
+const Note SND_THRESHOLD_10[]  PROGMEM = {{1250, 35}, {0, 0}};
+const Note SND_THRESHOLD_50[]  PROGMEM = {{1250, 35}, {0, 80}, {1250, 35}, {0, 0}};
+const Note SND_THRESHOLD_100[] PROGMEM = {{1250, 35}, {0, 80}, {1250, 35},
+                                          {0, 80}, {1250, 35}, {0, 0}};
+const Note SND_CAL_OK[]     PROGMEM = {{1200, 45}, {0, 70}, {1200, 45}, {0, 0}};
 const Note SND_SCAN_START[] PROGMEM = {{2200, 250}, {0, 0}};
 // Baseline learned, alarm now live.  Deliberately RISING: the start tone
 // is one flat note, the calibration tone is two equal beeps and the stop
