@@ -1,6 +1,6 @@
 /*
   =====================================================================
-   MILLIVOLT MEASUREMENT AND ALARM SYSTEM                      v3.2
+   MILLIVOLT MEASUREMENT AND ALARM SYSTEM                      v3.3
    Arduino UNO R3  +  ADS1256 24-bit ADC  +  microSD logging
   =====================================================================
 
@@ -15,29 +15,29 @@
        ->  the unit calibrates its own electrical zero, by itself.  A
            relay shorts the antenna connector, the ADS1256 learns that
            condition as zero (SYSOCAL), the relay releases.  Green LED
-           blinks throughout and goes solid when it is done.
+           blinks during settling; wait for steady green and red off.
      READY
        ->  the operator puts the antenna in its normal scanning
            position over ordinary ground.
      START
-       ->  a short click immediately confirms that the button was seen.
+       ->  a very short beep confirms that START was received.
            If the power-on zero was not accepted, START safely retries it
            once and continues automatically when it succeeds.
-       ->  the FIRST 5 SECONDS of the real scan are the ground
-           baseline.  The alarm is held off while it is learned.
+       ->  1 s settling, then 5 s stationary ground-baseline learning.
+           A short beep and 3 recovery conversions precede detection.
        ->  after that every reading is compared with the CURRENT
            baseline:
              inside  baseline +/- selected %  = NORMAL, and the reading is
                allowed into the rolling 30-second baseline average
              outside                    = ABNORMAL, logged, counted,
                and NEVER allowed into the baseline
-           2 abnormal readings in a row  ->  red LED + buzzer.
+           2 abnormal readings on the same side in a row -> alarm.
      STOP
        ->  the CSV file is closed and a summary is printed.
 
-   The baseline therefore follows ordinary ground as it changes while
-   the operator walks, but an anomaly can never teach the unit that the
-   anomaly is normal.
+   Start walking only at the green scanning heartbeat (a brief off-pulse
+   each second). Only normal points update the rolling baseline; slow
+   changes within the limits can be absorbed into the reference.
 
    TWO DIFFERENT THINGS THAT ARE EASY TO CONFUSE
    ---------------------------------------------
@@ -48,13 +48,13 @@
          resistors, the bias network and the wiring.  Nothing to do
          with soil.  The antenna can be anywhere.
 
-     first 5 s after START          =  GROUND BASELINE learning.
+     5 s after the 1 s settle       =  GROUND BASELINE learning.
          The normal millivolt level of the earth being surveyed.
          The antenna MUST be in its normal scanning position over
          representative ordinary ground - NOT held in the air.
 
    Alarm rule:
-     alarm when  reading > baseline + P %   or   reading < baseline - P %
+     band = max(abs(baseline) x P/100, 0.001 mV), above and below.
      P is selected by the D2 button: 10 %, 50 %, or 100 %.  Each press
      while idle advances one setting and confirms it with one, two, or
      three short beeps.  START freezes the selection for that scan and
@@ -64,8 +64,8 @@
      Power-on defaults to 10 %.  Button presses during a scan are ignored.
 
    Logging:
-     Every reading goes to the Serial Monitor (115200 baud).  With a
-     microSD card fitted, EVERY SCAN gets its own file - SCAN0001.CSV,
+     Recording points go to Serial (115200 baud). A working microSD card
+     is required; EVERY SCAN gets its own file - SCAN0001.CSV,
      SCAN0002.CSV, ...  Each file starts with a header block (file ID,
      alarm %, learning time, window length, and whether the automatic
      zero calibration was valid), then one row per point, then a
@@ -83,21 +83,22 @@
    ------
      power-on ........ three rising notes
      threshold button  one beep = 10 %, two = 50 %, three = 100 %
-     START received .. one short click; wait while preflight finishes
+     START received .. one very short beep; wait through preflight
      zero cal done ... two beeps, same pitch
      scan started .... one long beep
-     baseline ready .. two rising notes - the alarm is now live
+     baseline ready .. one short beep, then recovery; wait for heartbeat
      scan stopped .... two falling notes
-     ALARM ........... beep-beep-beep while the reading is outside the limits
-     fault ........... fast beeps, red LED winks
+     ALARM ........... one 50 ms beep each second while confirmed
+     fault ........... four fast beeps; red flashes briefly every 2 s
 
    LEDs
    ----
-     green blinking (fast, ~3 Hz) .. calibrating the electrical zero
-     green blinking (very fast) .... settling, then learning the baseline
+     green blinking (~1.7 Hz) ..... electrical zero; blinking can pause
+     green blinking (5 Hz) ........ settling, then learning the baseline
      green blinking (slow wink) .... READY but NOT zero-calibrated;
                                      START will retry once
-     green solid ................... ready, or scanning normally
+     green solid + red off ......... idle and ready
+     green brief off-pulse each s .. recording (alarm armed)
      red solid ..................... ALARM
      red winks once every 2 s ...... a fault: ADC, SD card, or a missing
                                      zero calibration (details on the
@@ -119,75 +120,75 @@
      COMPLETE.  Serial and CSV status messages now agree on every exit.
    * CSV fields are no longer padded with spaces.  Empty values are truly
      empty, so strict parsers and exact-match filters work without TRIM().
-   * The knob deadband was reduced so a slow end-to-end turn reaches all
-     181 half-percent settings from 10.0 % through 100.0 %.
+
+
    * TEST_MODE identifies simulated data in the CSV and provides 20 %,
      60 % and 120 % anomaly levels for endpoint verification.
    * START now acknowledges the button immediately and, when necessary,
      retries zero calibration once before either starting automatically or
      reporting a clear four-beep/red-wink fault.
 
-   ---------------------------------------------------------------------
-   What changed in v2.9  -  KNOB RANGE 10 % TO 100 %
-  ---------------------------------------------------------------------
-   The active A0 threshold knob now covers 10.0 % through 100.0 %, still
-   in 0.5 % steps.  Fully toward the low end is the most sensitive setting:
-   a 10 % change from the rolling baseline can alarm.  At the high end a
-   reading must move by 100 % of the baseline before it can alarm.
 
-   The setting is still frozen when START is pressed, printed on Serial,
-   and saved as Alarm_Threshold_Percent in that scan's CSV.  The detection,
-   rolling-baseline, confirmation, calibration and logging paths are
-   otherwise unchanged from v2.8.
 
-  ---------------------------------------------------------------------
-   What changed in v2.8  -  THE ALARM PERCENTAGE IS ON A KNOB
-  ---------------------------------------------------------------------
-   The 10 k potentiometer on A0, wired since v1.x and ignored since the
-   client fixed the rule at 10 %, now sets the alarm percentage: 5.0 %
-   to 30.0 % in 0.5 % steps (KNOB_MIN_PERCENT / KNOB_MAX_PERCENT).
 
-     * FROZEN AT START.  The knob is read once when START is pressed and
-       that value is used for the whole scan.  Turning it mid-scan cannot
-       change a recording, and a file never contains two rules.  During a
-       scan the knob is not read at all, so the scan path is unchanged.
 
-     * THE FILE SAYS WHICH.  Alarm_Threshold_Percent in the CSV header
-       was already derived from the rule in force, so it now carries the
-       knob's value with no change to the file format.
 
-     * VISIBLE ON THE BENCH.  While idle, turning the knob prints the new
-       setting (a slow turn prints every 0.5 % step).  START prints the
-       frozen value, as do the banner and 's'.  In the field, with no
-       Serial Monitor, the knob needs a marked scale: at 5 - 30 % the
-       centre is 17.5 % and 10 % is about one fifth of the way round.
 
-     * NO FLICKER.  The reading is an average of 16 and has a 6-count
-       deadband, so a knob parked between two steps cannot flip between
-       them - and the value START freezes is the value last printed.
 
-   Built from a first draft of this feature that was written against an
-   older copy (v2.4 plus the v2.5 change) and called itself v2.6;
-   dropped in as it was, it would have discarded the real v2.6 (the
-   aligned CSV) and v2.7 (the armed tone).  That draft also did not compile: static_assert cannot
-   test a plain "const float".  Here the limits are constexpr and the
-   compiler also checks they are whole or half percentages.
 
-   Also fixed while here:
-     * 's' during the settle and learning period showed the knob's live
-       value rather than the rule the scan had frozen.
-     * Alarm limits are printed only while a scan is running.  After STOP
-       they were being quoted against the previous scan's baseline.
-     * A comment in automaticZeroCalibration() still promised that the
-       learning period aborts a near-zero baseline.  v2.5 removed that
-       abort; the comment now says so.  (Comment only.)
 
-   Paid for, at 99 % flash, by merging the three-line start-up banner
-   into one and shortening three rare Serial messages ("not scanning",
-   "ADC not responding - scan refused", "file numbers all used").
-   Nothing else in the measurement, detection or file format changed.
-   With KNOB_ENABLED 0 this build is 150 bytes SMALLER than v2.7.
-   32,088 of 32,256 bytes (99 %), 168 free, on arduino:avr 1.8.8.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
   ---------------------------------------------------------------------
    What changed in v2.7  -  A TONE WHEN THE ALARM GOES LIVE
@@ -569,7 +570,7 @@
      D11 (MOSI)    ->  ADS1256 DIN    and  SD breakout DI
      D12 (MISO)    <-  ADS1256 DOUT   and  SD breakout DO
      D13 (SCK)     ->  ADS1256 SCLK   and  SD breakout CLK
-     A0            ->  NOT USED (old analogue knob disconnected)
+     A0            ->  NOT USED
      A1            ->  SD breakout CS
      A2            ->  ADS1256 PDWN (labelled SYNC on some boards)
      A3            ->  NOT USED.  This ADS1256 module has no RESET pin;
@@ -605,7 +606,7 @@
 #include <SD.h>
 #include <avr/wdt.h>
 
-#define FIRMWARE_VERSION "v3.2"
+#define FIRMWARE_VERSION "v3.3"
 #define FIRMWARE_BUILD_DATE "25 Sep 2026"
 
 // =====================================================================
@@ -638,10 +639,10 @@ const bool ALARM_BOTH_DIRECTIONS = true;
 // every sample would alarm.  0.001 mV = 1 microvolt.
 const float MIN_THRESHOLD_MV = 0.001;
 
-// How many ABNORMAL readings in a row before the buzzer and red LED come
-// on, so one noisy sample cannot cry wolf.  The client asked for 3 when a
-// point was half a second; at 10 points/s, 2 is 0.2 s and detects a
-// half-second object - well under a metre of ground at walking pace.
+// How many same-side ABNORMAL readings in a row confirm the alarm.
+// A normal reading or a change to the opposite side resets confirmation.
+// At 10 points/s the two points are about 0.1 s apart; input filtering,
+// sampling phase and processing also affect actual detection latency.
 // This delays only the ALARM.  Every abnormal reading is still logged as
 // ABNORMAL straight away and is excluded from the baseline straight away,
 // so a suspicious reading can never contaminate what the unit considers
@@ -727,7 +728,7 @@ const bool REQUIRE_SD_FOR_SCAN = true;
 #define BUZZER_PASSIVE     1
 #define BUZZER_IDLE_LEVEL  HIGH
 const unsigned int BUZZER_ALARM_HZ = 2500;   // alarm pitch (passive buzzers only)
-const bool ALARM_BEEPING = true;             // true = beep-beep-beep, false = continuous tone
+const bool ALARM_BEEPING = true;             // true = brief periodic beeps; false = continuous
 const unsigned int ALARM_BEEP_ON_MS = 50;
 const unsigned int ALARM_BEEP_PERIOD_MS = 1000;
 
@@ -753,8 +754,8 @@ const unsigned long ADC_MISS_MS = 150;
 // they happen, but a flush also rewrites the directory entry, which is
 // the slow part - doing that ten times a second would be what finally
 // made the unit miss conversions.  Twenty seconds greatly reduces the
-// forced-write disturbances, but risks up to 20 seconds of recent data
-// if the battery is pulled mid-scan.
+// forced-write disturbances. Power loss can lose buffered rows and
+// damage file metadata; 20 s is not a guaranteed maximum loss window.
 const unsigned long LOG_FLUSH_MS = 20000;
 
 // How many conversions the 'c' command averages when it reports the zero
@@ -764,7 +765,7 @@ const uint8_t SYSOCAL_AVG_POINTS = 10;
 
 // ---- Indicators ---------------------------------------------------
 // Blink the green LED while calibrating and during settling/baseline
-// learning.  Solid green = ready, or scanning normally.
+// learning.  Solid green = ready; a brief off-pulse each second = scanning.
 const bool BLINK_GREEN_WHEN_BUSY = true;
 
 // ---- Watchdog -----------------------------------------------------
@@ -807,7 +808,7 @@ const uint8_t PIN_BUZZER             = 8;
 const uint8_t PIN_ADC_DRDY           = 9;
 const uint8_t PIN_ADC_CS             = 10;
 // D11 = MOSI, D12 = MISO, D13 = SCK  (fixed by the UNO hardware)
-// A0 is deliberately unused after removal of the analogue knob.
+// A0 is unused; threshold selection uses the D2 button.
 const uint8_t PIN_SD_CS              = A1;
 const uint8_t PIN_ADC_PDWN           = A2;
 // A3 is deliberately unused.  Earlier versions drove it as an ADS1256
@@ -928,10 +929,10 @@ const Note SND_THRESHOLD_100[] PROGMEM = {{1250, 35}, {0, 80}, {1250, 35},
                                           {0, 80}, {1250, 35}, {0, 0}};
 const Note SND_CAL_OK[]     PROGMEM = {{1200, 45}, {0, 70}, {1200, 45}, {0, 0}};
 const Note SND_SCAN_START[] PROGMEM = {{2200, 250}, {0, 0}};
-// Baseline learned, alarm now live.  Deliberately RISING: the start tone
-// is one flat note, the calibration tone is two equal beeps and the stop
-// tone falls, so an operator who is walking and not looking can tell
-// which of the four just happened.
+// Historical armed pattern, retained but unused by current logic.
+// Learning now ends with SND_CLICK (one 35 ms beep), followed by three
+// recovery conversions before SCANNING. Wait for the green heartbeat
+// before walking; this two-note pattern is not an active operating cue.
 const Note SND_ARMED[]      PROGMEM = {{2000, 80}, {0, 50}, {2800, 160}, {0, 0}};
 const Note SND_SCAN_STOP[]  PROGMEM = {{2000, 90}, {0, 50}, {1500, 140}, {0, 0}};
 const Note SND_ERROR[]      PROGMEM = {{3000, 60}, {0, 60}, {3000, 60}, {0, 60},
@@ -1001,8 +1002,8 @@ void updateBuzzer() {
 }
 
 // Used for short acknowledgement sounds where the next action may block
-// for several seconds.  Completing the click first makes a button press
-// unmistakable even while SD.begin() or zero calibration is busy.
+// for several seconds.  Completing the short beep first makes a press
+// unmistakable even while SD initialization or zero calibration is busy.
 void soundPlayBlocking(const Note *seq) {
   soundStart(seq);
   while (seqRunning) { updateBuzzer(); watchdogKick(); }
@@ -1272,6 +1273,9 @@ Button btnStop  = {PIN_BTN_STOP,  true, true, 0};
 Button btnThreshold = {PIN_BTN_THRESHOLD, true, true, 0};
 
 const unsigned long DEBOUNCE_MS = 30;
+const unsigned long IDLE_ZERO_HOLD_MS = 2000;
+bool stopHoldArmed = false;
+unsigned long stopPressedMs = 0;
 
 // Returns true exactly once each time the button is pressed down.
 bool buttonWasPressed(Button &b) {
@@ -1387,7 +1391,7 @@ bool faultActive() { return sdFault || !adcOk || inputFault || zeroCalMissing();
 bool recording() { return phase >= SETTLING; }
 
 // Alarm band for the CURRENT baseline.  With a positive baseline this is
-// exactly the client's  baseline x 0.90 .. baseline x 1.10;  fabs() is
+// baseline +/- selected percent, with a 0.001 mV minimum band. fabs() is
 // used so that a negative baseline still gives low < high instead of
 // silently swapping the two limits.
 void alarmLimits(float base, float percent, float &thr, float &low, float &high) {
@@ -1474,20 +1478,41 @@ float statsSpread(const Stats &s) { return s.n ? s.maxV - s.minV : 0.0; }
 // =====================================================================
 //  SD CARD LOGGING  -  one CSV file per scan
 // =====================================================================
-File logFile;
+// Use the library's checked sync/close API rather than File, whose void
+// flush/close wrappers discard storage errors.  Print calls the byte
+// writer below, which also latches short writes missed by SdFile itself.
+class CheckedLogFile : public SdFile {
+public:
+  using SdFile::write;
+  size_t write(uint8_t b) override {
+    if (getWriteError()) return 0;
+    size_t count = SdFile::write(b);
+    if (count != 1) setWriteError();
+    return count;
+  }
+};
+Sd2Card sdCard;
+SdVolume sdVolume;
+SdFile sdRoot;
+CheckedLogFile logFile;
 bool logOpen = false;
+bool sdNeedsRestart = false;
 char logFileName[13] = "";                // file currently being written
 uint16_t nextScanIndex = 0;               // 0 = "not looked at the card yet"
 
-// Try to start the SD card (also used to retry later if no card at power-up)
+// Mount once per boot.  After any SD fault, require power-off before
+// checking the card.  Never remount over this library's dirty cache.
 bool sdStart() {
+  if (sdNeedsRestart) return false;
   if (sdReady) return true;
-  sdReady = SD.begin(PIN_SD_CS);
+  sdReady = sdCard.init(SPI_HALF_SPEED, PIN_SD_CS) &&
+            sdVolume.init(&sdCard) && sdRoot.openRoot(&sdVolume);
   if (sdReady) {
     nextScanIndex = 0;
     sdFault = false;
   } else {
     sdFault = true;
+    sdNeedsRestart = true;
   }
   return sdReady;
 }
@@ -1496,11 +1521,13 @@ bool sdStart() {
 // failure is the one fault that would let the operator finish a survey
 // believing the data was saved.
 void sdWriteFailed() {
-  Serial.println(F("*** SD WRITE FAILED - NOT being saved. Serial only. Stop and check the card."));
-  if (logOpen) { logFile.clearWriteError(); logFile.close(); }
+  Serial.println(F("SD SAVE FAILED. Power off; check card."));
+  // Do not retry close/flush after a failure: the shared cache may hold
+  // an incomplete write.  Leave the handle untouched until power-off.
   logOpen = false;
+  sdNeedsRestart = true;
   logFileName[0] = 0;
-  sdReady = false;                        // force SD.begin() again next time
+  sdReady = false;
   sdFault = true;
   // A failure can first appear on the final flush after phase has already
   // returned to READY.  Preserve the truthful result for Serial even if
@@ -1526,9 +1553,11 @@ void logFlushIfDue() {
 
 // Push the last rows onto the card and check that they arrived.
 bool logFlushChecked() {
-  if (!logOpen) return true;
-  logFile.flush();
-  if (logFile.getWriteError()) { sdWriteFailed(); return false; }
+  if (!logOpen) return !sdNeedsRestart;
+  if (logFile.getWriteError() || !logFile.sync()) {
+    sdWriteFailed();
+    return false;
+  }
   return true;
 }
 
@@ -1556,7 +1585,11 @@ bool logOpenNew(const char *prefix, uint16_t &nextIndex) {
   if (nextIndex == 0) nextIndex = 1;
   while (nextIndex <= MAX_FILE_INDEX) {
     makeFileName(prefix, nextIndex);
-    if (!SD.exists(logFileName)) break;
+    if (!logFile.open(&sdRoot, logFileName, O_READ)) {
+      if (sdCard.errorCode()) { sdWriteFailed(); return false; }
+      break;
+    }
+    if (!logFile.close()) { sdWriteFailed(); return false; }
     nextIndex++;
     watchdogKick();
   }
@@ -1567,27 +1600,28 @@ bool logOpenNew(const char *prefix, uint16_t &nextIndex) {
     sdFault = true;
     return false;
   }
-  logFile = SD.open(logFileName, FILE_WRITE);
-  logOpen = (bool)logFile;
+  logFile.clearWriteError();
+  // Exclusive creation is essential: a failed existence probe must
+  // never cause a new scan to append to or overwrite an existing log.
+  logOpen = logFile.open(&sdRoot, logFileName, O_CREAT | O_EXCL | O_WRITE);
   if (!logOpen) {
-    logFileName[0] = 0;
-    sdReady = false;                      // make the next attempt re-mount the card
-    sdFault = true;
-    soundStart(SND_ERROR);
+    sdWriteFailed();
     return false;
   }
   nextIndex++;                            // next file starts after this one
   return true;
 }
 
-void logClose() {
-  if (logOpen) {
-    logFile.flush();
-    bool bad = logFile.getWriteError();
-    logFile.close();
-    logOpen = false;
-    if (bad) sdWriteFailed();
+bool logClose() {
+  if (!logOpen) return false;
+  // SdFile::close synchronizes data and directory information and
+  // returns the result.  Only a checked success earns the saved cue.
+  if (logFile.getWriteError() || !logFile.close()) {
+    sdWriteFailed();
+    return false;
   }
+  logOpen = false;
+  return true;
 }
 
 // ---------------------------------------------------------------------
@@ -1789,9 +1823,9 @@ void actionCycleThreshold() {
 }
 
 void printHelp() {
-  Serial.println(F("D2 THRESHOLD; D4 START; D5 STOP / idle RE-ZERO."));
+  Serial.println(F("D2 THRESHOLD; D4 START; D5 STOP; hold D5 idle 2s to RE-ZERO."));
   Serial.println(F("THRESHOLD: 1 beep=10%, 2=50%, 3=100%; idle only."));
-  Serial.println(F("Serial: 1 start, 2 stop/re-zero, s status, c zero, r ADC, v version, ? help"));
+  Serial.println(F("Serial: 1 start, 2 stop, s status, c zero, r ADC, v version, ? help"));
 #if TEST_MODE
   Serial.println(F("a: simulated anomaly OFF/+20/+60/+120 %."));
 #endif
@@ -1897,6 +1931,7 @@ void logScanRow(unsigned long n, unsigned long tms, float mv, float base,
   logFile.print(',');
   logFile.print(run);                       logFile.print(',');
   logFile.println(alarm ? F("YES") : F("NO"));
+  if (logFile.getWriteError()) sdWriteFailed();
   // NOT flushed here.  See logFlushIfDue(): flushing ten times a second
   // is what would finally make the unit miss conversions.
 }
@@ -1907,19 +1942,19 @@ void logScanRow(unsigned long n, unsigned long tms, float mv, float base,
 void updateLeds() {
   bool green;
   if (phase == CALIBRATING)    green = BLINK_GREEN_WHEN_BUSY ? ((millis() % 600) < 300) : true;
-  // SETTLING blinks like LEARNING: neither is armed, and a solid green
-  // during the settle reads as "scanning normally" to the operator,
-  // who would then start walking a second before anything is learned.
+  // SETTLING blinks like LEARNING: neither is armed.  Scanning has a
+  // separate heartbeat so the operator can distinguish it from READY.
   else if (phase == LEARNING || phase == SETTLING)
                                green = BLINK_GREEN_WHEN_BUSY ? ((millis() % 200) < 100) : true;
   // Calibration failed and was not retried: the unit looks idle but will
   // refuse to scan.  A slow green blink plus the red fault wink says so
   // from across a field, where nobody is reading the Serial Monitor.
   else if (zeroCalMissing()) green = (millis() % 1600) < 200;
-  else                         green = true;    // READY or SCANNING = solid
+  else if (phase == SCANNING) green = (millis() % 1000) >= 100;
+  else                       green = true;    // READY = steady green
 
   bool red;
-  if (alarmActive)        red = true;                    // steady red = this point is outside the limits
+  if (alarmActive)        red = true;                    // steady red = same-side alarm confirmed
   else if (faultActive()) red = (millis() % FAULT_WINK_PERIOD_MS) < FAULT_WINK_MS;   // wink = something needs attention
   else                    red = false;
 
@@ -1956,8 +1991,8 @@ const __FlashStringHelper *scanStatusText() {
   }
 }
 
-void finishScanFile() {
-  if (!logOpen) return;
+bool finishScanFile() {
+  if (!logOpen) return false;
   logFile.println();
   logFile.println(F("[SUMMARY]"));
 
@@ -2014,7 +2049,7 @@ void finishScanFile() {
       lbl(28);  logFile.println(lastAlarmPoint);
     }
   }
-  logClose();
+  return logClose();
 }
 
 // Refuse to record anything while the converter is not answering: a file
@@ -2123,15 +2158,12 @@ void actionStartScan() {
 }
 
 void actionStopScan() {
-  if (!recording()) {
-    Serial.println(F("Idle STOP: re-zeroing."));
-    actionSystemZeroCalibrate();
-    return;
-  }
+  if (!recording()) return;
   if (scanStatus == SCAN_RUNNING) {
     scanStatus = (baselineReady && phase == SCANNING) ? SCAN_COMPLETE : SCAN_EARLY_STOP;
   }
   phase       = READY;
+  digitalWrite(PIN_LED_GREEN, LOW); // stay dark until final save completes
   alarmActive = false;
   abnormalRun = 0;
   abnormalSide = 0;
@@ -2145,11 +2177,11 @@ void actionStopScan() {
   }
   if (droppedPoints) { Serial.print(F("Dropped : ")); Serial.println(droppedPoints); }
   if (saturatedPoints) { Serial.print(F("Saturated: ")); Serial.println(saturatedPoints); }
-  finishScanFile();
+  bool saved = finishScanFile();
   Serial.print(F("SCAN ")); Serial.println(scanStatusText());
   if (logFileName[0]) { Serial.print(F("File    : ")); Serial.println(logFileName); }
-  if (scanStatus == SCAN_COMPLETE || scanStatus == SCAN_EARLY_STOP) {
-    Serial.println(F("READY."));
+  if (saved && (scanStatus == SCAN_COMPLETE || scanStatus == SCAN_EARLY_STOP)) {
+    Serial.println(F("SAVED. READY."));
     soundStart(SND_SCAN_STOP);
   } else {
     Serial.println(F("FAULT: correct it before a new scan."));
@@ -2401,7 +2433,7 @@ void actionSystemZeroCalibrate() {
 //
 // It deliberately does NOT learn a ground baseline.  Electrical zero
 // calibration and soil-baseline learning are two different things: the
-// baseline comes from the first 5 s after START, with the antenna in its
+// baseline uses 5 s after the 1 s START settle, with the antenna in its
 // normal scanning position over representative ordinary ground.
 void runStartupCalibration() {
   phase = CALIBRATING;
@@ -2658,7 +2690,7 @@ void updateAdcHealth() {
       soundStart(SND_CLICK);
     } else {
       // automaticZeroCalibration() already started the error pattern.  Do
-      // not overwrite it with a success-like click after a failed recovery.
+      // not overwrite it with a success-like beep after a failed recovery.
       Serial.println(F("START will retry zero."));
     }
   }
@@ -2765,7 +2797,7 @@ void handlePoint(float mv) {
       Serial.println(F(" readings ----"));
       printAlarmRule(scanPercent);
       // Tell the operator that baseline learning is complete, then let the
-      // ADC recover before the actual scan begins.  This short click and
+      // ADC recover before detection begins. This very short beep and
       // the three recovery conversions happen before SCANNING, so no
       // active-scan points are discarded or corrupted by the notification.
       soundPlayBlocking(SND_CLICK);
@@ -2845,6 +2877,24 @@ void handlePoint(float mv) {
 // =====================================================================
 //  MAIN LOOP
 // =====================================================================
+// A press that stops a recording is consumed until release.  It must
+// never become an idle re-zero just because the operator keeps holding.
+void pollStopButton() {
+  if (buttonWasPressed(btnStop)) {
+    stopHoldArmed = !recording();
+    stopPressedMs = millis();
+    if (!stopHoldArmed) actionStopScan();
+  }
+  if (btnStop.stableState || recording()) stopHoldArmed = false;
+  // Also require the raw level to remain pressed; a release at the
+  // two-second boundary must not calibrate while release is debouncing.
+  if (stopHoldArmed && !btnStop.lastReading &&
+      millis() - stopPressedMs >= IDLE_ZERO_HOLD_MS) {
+    stopHoldArmed = false;
+    actionSystemZeroCalibrate();
+  }
+}
+
 void loop() {
   watchdogKick();
 
@@ -2869,5 +2919,5 @@ void loop() {
   // ---- buttons ----
   if (buttonWasPressed(btnThreshold)) actionCycleThreshold();
   if (buttonWasPressed(btnStart)) actionStartScan();
-  if (buttonWasPressed(btnStop))  actionStopScan();
+  pollStopButton();
 }
