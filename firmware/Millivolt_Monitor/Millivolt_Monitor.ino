@@ -1,6 +1,6 @@
 /*
   =====================================================================
-   MILLIVOLT MEASUREMENT AND ALARM SYSTEM                      v3.0
+   MILLIVOLT MEASUREMENT AND ALARM SYSTEM                      v3.1
    Arduino UNO R3  +  ADS1256 24-bit ADC  +  microSD logging
   =====================================================================
 
@@ -27,7 +27,7 @@
            baseline.  The alarm is held off while it is learned.
        ->  after that every reading is compared with the CURRENT
            baseline:
-             inside  baseline +/- knob %  = NORMAL, and the reading is
+             inside  baseline +/- selected %  = NORMAL, and the reading is
                allowed into the rolling 30-second baseline average
              outside                    = ABNORMAL, logged, counted,
                and NEVER allowed into the baseline
@@ -55,14 +55,13 @@
 
    Alarm rule:
      alarm when  reading > baseline + P %   or   reading < baseline - P %
-     P is set by the potentiometer on A0, 10.0 % to 100.0 % in 0.5 % steps,
-     read when START is pressed and FROZEN for that scan.  It is printed
-     on the Serial Monitor whenever the knob is turned while idle, again
-     at START, and written into the CSV header as Alarm_Threshold_Percent.
+     P is selected by the D2 button: 10 %, 50 %, or 100 %.  Each press
+     while idle advances one setting and confirms it with one, two, or
+     three short beeps.  START freezes the selection for that scan and
+     writes it into the CSV header as Alarm_Threshold_Percent.
      A smaller percentage is more sensitive; a larger percentage requires
      a larger change from the baseline before the alarm sounds.
-     (The client's original instruction, 16 Sep 2026, was "always the
-     baseline plus / minus 10 %".  KNOB_ENABLED 0 restores exactly that.)
+     Power-on defaults to 10 %.  Button presses during a scan are ignored.
 
    Logging:
      Every reading goes to the Serial Monitor (115200 baud).  With a
@@ -83,6 +82,7 @@
    Sounds
    ------
      power-on ........ three rising notes
+     threshold button  one beep = 10 %, two = 50 %, three = 100 %
      START received .. one short click; wait while preflight finishes
      zero cal done ... two beeps, same pitch
      scan started .... one long beep
@@ -551,7 +551,7 @@
    Wiring summary (full details in the wiring guide)
   ---------------------------------------------------------------------
      Arduino pin   ->  what
-     D2            ->  spare (was a baseline button in v1.x)
+     D2            ->  THRESHOLD button (other leg to GND)
      D3            ->  ZERO-CALIBRATION RELAY driver
                          D3 -> 1 k -> 2N2222 base
                          2N2222 base -> 13 k -> GND   (hold-off)
@@ -569,12 +569,7 @@
      D11 (MOSI)    ->  ADS1256 DIN    and  SD breakout DI
      D12 (MISO)    <-  ADS1256 DOUT   and  SD breakout DO
      D13 (SCK)     ->  ADS1256 SCLK   and  SD breakout CLK
-     A0            <-  10 k potentiometer WIPER (centre pin) = alarm %
-                       outer pins: one to 5V, the other to GND.  For
-                       "clockwise = higher %", looking at the front of
-                       the pot with the pins pointing down: RIGHT pin
-                       to 5V, LEFT pin to GND.  Wired the other way
-                       round it simply works backwards.
+     A0            ->  NOT USED (old analogue knob disconnected)
      A1            ->  SD breakout CS
      A2            ->  ADS1256 PDWN (labelled SYNC on some boards)
      A3            ->  NOT USED.  This ADS1256 module has no RESET pin;
@@ -610,8 +605,8 @@
 #include <SD.h>
 #include <avr/wdt.h>
 
-#define FIRMWARE_VERSION "v3.0"
-#define FIRMWARE_BUILD_DATE "23 Sep 2026"
+#define FIRMWARE_VERSION "v3.1"
+#define FIRMWARE_BUILD_DATE "25 Sep 2026"
 
 // =====================================================================
 //  SETTINGS  (the only block you normally need to touch)
@@ -623,15 +618,14 @@
 // buzzer and SD card.  While SCANNING in test mode you can fake a
 // "buried object" by typing a in the Serial Monitor.  Repeated presses
 // cycle OFF -> +20 % -> +60 % -> +120 % -> OFF, which verifies the
-// 10 %, 55 % and 100 % knob settings.  Set to 0 for the real device.
+// 10 %, 50 % and 100 % button settings.  Set to 0 for the real device.
 #ifndef TEST_MODE
 #define TEST_MODE 0
 #endif
 
 // ---- Alarm rule ---------------------------------------------------
-// The alarm percentage used when KNOB_ENABLED (below) is 0.  With the
-// knob enabled, the knob sets it instead.  10 % is the client's own
-// instruction: "always the baseline plus / minus 10 %".
+// Initial threshold on every power-up.  The D2 button cycles through
+// 10 %, 50 %, and 100 % while idle.  The client's original rule was 10 %.
 const float ALARM_PERCENT = 10.0;
 
 // true  = alarm when the reading moves away from the baseline in EITHER
@@ -712,26 +706,11 @@ constexpr float CAL_VERIFY_MV = 0.002;
 // which is what the successful 21 Sep relay/SYSOCAL test used.
 const uint8_t RELAY_SETTLE_CONVERSIONS = 5;
 
-// ---- Threshold knob (10 k potentiometer on A0) ---------------------
-// 1 = the knob sets the alarm percentage, anywhere from KNOB_MIN_PERCENT
-//     to KNOB_MAX_PERCENT in 0.5 % steps.  The setting is read when
-//     START is pressed and FROZEN for that scan - turning the knob
-//     mid-scan cannot change a recording - and it is written into the
-//     CSV header as Alarm_Threshold_Percent.
-// 0 = the knob is ignored and every scan uses ALARM_PERCENT above
-//     (the client's original "always baseline +/- 10 %").
-// Both limits must be whole or half percentages (10.0, 12.5, 100.0 ...);
-// the compiler refuses anything else.  With the knob wired as in the
-// wiring summary, fully anticlockwise = KNOB_MIN_PERCENT.  At 10 - 100 %
-// the centre is 55 %.  Lower percentages are more sensitive; higher
-// percentages require a larger change before the alarm sounds.
-// While the unit is idle the knob is read after every conversion (10
-// times a second) and any change is printed on the Serial Monitor, so
-// the setting can be dialled in by eye on the bench.  During a scan it
-// is not read at all.
-#define KNOB_ENABLED 1
-constexpr float KNOB_MIN_PERCENT = 10.0;
-constexpr float KNOB_MAX_PERCENT = 100.0;
+// ---- Threshold selection button -----------------------------------
+// A normally-open button connects D2 to GND when pressed.  INPUT_PULLUP
+// supplies the pull-up; no external resistor or 5 V button wire is needed.
+// Selection is ignored while recording, so an active scan cannot change.
+const uint8_t THRESHOLD_PERCENTAGES[3] = {10, 50, 100};
 
 // Field operation requires a persistent CSV.  Set this to false only for
 // controlled bench work where Serial-only operation is intentional.
@@ -749,8 +728,8 @@ const bool REQUIRE_SD_FOR_SCAN = true;
 #define BUZZER_IDLE_LEVEL  HIGH
 const unsigned int BUZZER_ALARM_HZ = 2500;   // alarm pitch (passive buzzers only)
 const bool ALARM_BEEPING = true;             // true = beep-beep-beep, false = continuous tone
-const unsigned int ALARM_BEEP_ON_MS = 120;
-const unsigned int ALARM_BEEP_PERIOD_MS = 300;
+const unsigned int ALARM_BEEP_ON_MS = 50;
+const unsigned int ALARM_BEEP_PERIOD_MS = 1000;
 
 // ---- Sampling -----------------------------------------------------
 // There is no sample interval any more.  Points are not produced on a
@@ -773,9 +752,10 @@ const unsigned long ADC_MISS_MS = 150;
 // How often the CSV file is pushed onto the card.  Rows are written as
 // they happen, but a flush also rewrites the directory entry, which is
 // the slow part - doing that ten times a second would be what finally
-// made the unit miss conversions.  Two seconds risks at most two
-// seconds of data if the battery is pulled mid-scan.
-const unsigned long LOG_FLUSH_MS = 2000;
+// made the unit miss conversions.  Twenty seconds greatly reduces the
+// forced-write disturbances, but risks up to 20 seconds of recent data
+// if the battery is pulled mid-scan.
+const unsigned long LOG_FLUSH_MS = 20000;
 
 // How many conversions the 'c' command averages when it reports the zero
 // before and after calibrating.  At 10 SPS, 10 points is about one second
@@ -807,9 +787,8 @@ const unsigned long SERIAL_BAUD = 115200;
 // =====================================================================
 //  PIN MAP
 // =====================================================================
-// D2 carried one of the old baseline buttons.  The baseline is now
-// learned from the scan itself, so that button has no function and the
-// sketch does not touch the pin at all - D2 is spare.
+// D2 reads the threshold-selection button using INPUT_PULLUP.  One
+// button leg goes to D2 and the other goes to GND.
 //
 // D3 is NOT spare.  It drives the automatic zero-calibration relay
 // through a 1 k base resistor into a 2N2222, with a 13 k base pull-down
@@ -818,6 +797,7 @@ const unsigned long SERIAL_BAUD = 115200;
 // rather than directly across AIN0/AIN1, so that closing it reproduces
 // the manual jumper that SYSOCAL was proven with and lets SYSOCAL cancel
 // the front-end resistors and wiring as well as the converter.
+const uint8_t PIN_BTN_THRESHOLD      = 2;
 const uint8_t PIN_ZERO_RELAY         = 3;
 const uint8_t PIN_BTN_START          = 4;
 const uint8_t PIN_BTN_STOP           = 5;
@@ -827,7 +807,7 @@ const uint8_t PIN_BUZZER             = 8;
 const uint8_t PIN_ADC_DRDY           = 9;
 const uint8_t PIN_ADC_CS             = 10;
 // D11 = MOSI, D12 = MISO, D13 = SCK  (fixed by the UNO hardware)
-const uint8_t PIN_POT                = A0;
+// A0 is deliberately unused after removal of the analogue knob.
 const uint8_t PIN_SD_CS              = A1;
 const uint8_t PIN_ADC_PDWN           = A2;
 // A3 is deliberately unused.  Earlier versions drove it as an ADS1256
@@ -899,16 +879,8 @@ static_assert(CAL_VERIFY_MV > 0.0 && CAL_VERIFY_MV < CAL_SANITY_MV,
               "CAL_VERIFY_MV must be above zero and below CAL_SANITY_MV");
 static_assert(ADC_SATURATION_CONFIRM_POINTS >= 1,
               "ADC_SATURATION_CONFIRM_POINTS must be at least 1");
-// The knob works in half-percent steps held in a uint8_t.  constexpr,
-// not const: a plain const float cannot appear in a static_assert,
-// which is exactly why the first draft of this feature did not compile.
-static_assert(KNOB_MIN_PERCENT > 0.0 && KNOB_MAX_PERCENT > KNOB_MIN_PERCENT,
-              "KNOB_MIN_PERCENT must be above 0 and below KNOB_MAX_PERCENT");
-static_assert(KNOB_MIN_PERCENT * 2.0 == (long)(KNOB_MIN_PERCENT * 2.0) &&
-              KNOB_MAX_PERCENT * 2.0 == (long)(KNOB_MAX_PERCENT * 2.0),
-              "Knob limits must be whole or half percentages");
-static_assert((KNOB_MAX_PERCENT - KNOB_MIN_PERCENT) * 2.0 < 255.0,
-              "Knob range too wide: at most 127 % from end to end");
+static_assert(sizeof(THRESHOLD_PERCENTAGES) == 3,
+              "Threshold button needs exactly three settings");
 
 // =====================================================================
 //  WATCHDOG HELPERS
@@ -948,6 +920,10 @@ void relayClose() {
 // =====================================================================
 const Note SND_POWER_ON[]   PROGMEM = {{1500, 80}, {0, 40}, {2000, 80}, {0, 40}, {2500, 120}, {0, 0}};
 const Note SND_CLICK[]      PROGMEM = {{2000, 35}, {0, 0}};
+const Note SND_THRESHOLD_10[]  PROGMEM = {{1700, 70}, {0, 0}};
+const Note SND_THRESHOLD_50[]  PROGMEM = {{1700, 70}, {0, 65}, {1700, 70}, {0, 0}};
+const Note SND_THRESHOLD_100[] PROGMEM = {{1700, 70}, {0, 65}, {1700, 70},
+                                          {0, 65}, {1700, 70}, {0, 0}};
 const Note SND_CAL_OK[]     PROGMEM = {{2500, 90}, {0, 70}, {2500, 90}, {0, 0}};
 const Note SND_SCAN_START[] PROGMEM = {{2200, 250}, {0, 0}};
 // Baseline learned, alarm now live.  Deliberately RISING: the start tone
@@ -1291,6 +1267,7 @@ bool adsSystemOffsetCalibrate() {
 // =====================================================================
 Button btnStart = {PIN_BTN_START, true, true, 0};
 Button btnStop  = {PIN_BTN_STOP,  true, true, 0};
+Button btnThreshold = {PIN_BTN_THRESHOLD, true, true, 0};
 
 const unsigned long DEBOUNCE_MS = 30;
 
@@ -1309,50 +1286,12 @@ bool buttonWasPressed(Button &b) {
 }
 
 // =====================================================================
-//  KNOB (potentiometer)  ->  alarm percentage in 0.5 % steps
+//  THRESHOLD BUTTON  ->  10 %, 50 %, or 100 %
 // =====================================================================
-// The wiper divides the UNO's own 5 V, and analogRead() measures against
-// that same 5 V, so the result depends only on where the knob is, not on
-// the supply.  Sixteen readings are averaged (about 1.8 ms in total).
-//
-// DEADBAND.  Plain rounding would let a knob parked on the boundary
-// between two steps flicker between them - printing a new setting ten
-// times a second and making it a coin toss which one START freezes.  So
-// the average must move KNOB_DEADBAND counts (of 1023) from the last
-// accepted position before the setting is worked out again.  Noise on a
-// 16-reading average is about one count; one 0.5 % step at 10 - 100 % is
-// about 5.7 counts.  Three counts reject the measured jitter while still
-// allowing a slow sweep to visit every half-percent setting.  The value
-// START freezes is therefore the value last printed, unless the knob has
-// actually been turned since.
-#if KNOB_ENABLED
-const uint8_t  KNOB_STEPS    = (uint8_t)((KNOB_MAX_PERCENT - KNOB_MIN_PERCENT) * 2.0);
-const uint8_t  KNOB_DEADBAND = 3;
-uint8_t  knobStep = 0;                   // 0 .. KNOB_STEPS, in 0.5 % steps
-uint16_t knobRaw  = 0xFFFF;              // last accepted average; 0xFFFF = not read yet
+uint8_t thresholdIndex = 0;             // power-on defaults to 10 %
 
-// Returns true when the setting changed.
-bool knobUpdate() {
-  uint16_t total = 0;
-  for (uint8_t i = 0; i < 16; i++) total += analogRead(PIN_POT);   // max 16368
-  uint16_t raw = total >> 4;                                        // 0 .. 1023
-  int16_t  d   = (int16_t)raw - (int16_t)knobRaw;
-  if (knobRaw != 0xFFFF && d > -KNOB_DEADBAND && d < KNOB_DEADBAND) return false;
-  knobRaw = raw;
-  uint8_t s = (uint8_t)(((uint32_t)raw * KNOB_STEPS + 511UL) / 1023UL);   // nearest step
-  if (s == knobStep) return false;
-  knobStep = s;
-  return true;
-}
-#endif
-
-// The alarm percentage the knob is selecting right now (or the fixed one)
-float knobAlarmPercent() {
-#if KNOB_ENABLED
-  return KNOB_MIN_PERCENT + knobStep * 0.5;
-#else
-  return ALARM_PERCENT;
-#endif
+float selectedAlarmPercent() {
+  return (float)THRESHOLD_PERCENTAGES[thresholdIndex];
 }
 
 // =====================================================================
@@ -1414,6 +1353,7 @@ const uint8_t SCAN_RUNNING = 0, SCAN_COMPLETE = 1, SCAN_ADC_FAULT = 2,
 uint8_t  scanStatus  = SCAN_RUNNING;
 
 uint8_t  abnormalRun = 0;            // ABNORMAL readings in a row, right now
+int8_t   abnormalSide = 0;           // -1 below limit, +1 above limit
 unsigned long alarmPoints = 0;       // points logged with the alarm ON
 // Counted separately by phase.  Lumping the learning readings in with
 // the scanning ones made "normal_points" mean two different things at
@@ -1817,7 +1757,7 @@ void printAlarmRule(float percent) {
   Serial.print(percent, 1); Serial.print(F(" %"));
   // Limits only while a scan is running.  After STOP, baselineReady is
   // still true and baselineMv still holds the LAST scan's baseline, so
-  // printing limits then - e.g. when the knob is turned between scans -
+  // printing limits then - e.g. when selection changes between scans -
   // would quote numbers the next scan will never use.
   if (baselineReady && recording()) {
     float thr, low, high;
@@ -1833,8 +1773,22 @@ void printAlarmRule(float percent) {
   Serial.println();
 }
 
+void actionCycleThreshold() {
+  if (recording()) {
+    Serial.println(F("Threshold unchanged during scan; press after STOP."));
+    return;
+  }
+  if (++thresholdIndex == 3) thresholdIndex = 0;
+  printAlarmRule(selectedAlarmPercent());
+  // Finish the count before another feedback sound can replace it.
+  if      (thresholdIndex == 0) soundPlayBlocking(SND_THRESHOLD_10);
+  else if (thresholdIndex == 1) soundPlayBlocking(SND_THRESHOLD_50);
+  else                          soundPlayBlocking(SND_THRESHOLD_100);
+}
+
 void printHelp() {
-  Serial.println(F("D4 START; D5 STOP / idle RE-ZERO."));
+  Serial.println(F("D2 THRESHOLD; D4 START; D5 STOP / idle RE-ZERO."));
+  Serial.println(F("THRESHOLD: 1 beep=10%, 2=50%, 3=100%; idle only."));
   Serial.println(F("Serial: 1 start, 2 stop/re-zero, s status, c zero, r ADC, v version, ? help"));
 #if TEST_MODE
   Serial.println(F("a: simulated anomaly OFF/+20/+60/+120 %."));
@@ -2115,6 +2069,7 @@ void actionStartScan() {
   alarmActive     = false;
   scanStatus      = SCAN_RUNNING;
   abnormalRun     = 0;
+  abnormalSide    = 0;
   alarmPoints     = 0;
   settlingPoints  = 0;
   learningPoints  = 0;
@@ -2127,10 +2082,7 @@ void actionStartScan() {
   maxDeltaPct     = 0.0;
   maxDeltaPctValid = false;
   maxDeltaPoint   = 0;
-#if KNOB_ENABLED
-  knobUpdate();                             // one last look, same deadband as the display
-#endif
-  scanPercent     = knobAlarmPercent();     // FROZEN for this scan: file and rows agree
+  scanPercent     = selectedAlarmPercent(); // FROZEN for this scan: file and rows agree
   digitalWrite(PIN_LED_RED, LOW);
 
   bool haveLog = logOpenNew("SCAN", nextScanIndex);
@@ -2180,6 +2132,7 @@ void actionStopScan() {
   phase       = READY;
   alarmActive = false;
   abnormalRun = 0;
+  abnormalSide = 0;
 
   Serial.print(F("Points ")); Serial.println(sampleNumber);
   if (baselineReady) {
@@ -2497,6 +2450,7 @@ void setup() {
 
   pinMode(PIN_BTN_START, INPUT_PULLUP);
   pinMode(PIN_BTN_STOP,  INPUT_PULLUP);
+  pinMode(PIN_BTN_THRESHOLD, INPUT_PULLUP);
   pinMode(PIN_LED_GREEN, OUTPUT);
   pinMode(PIN_LED_RED,   OUTPUT);
   digitalWrite(PIN_LED_GREEN, LOW);
@@ -2511,10 +2465,7 @@ void setup() {
   printVersion();
   // The settings all go into every CSV header now, so the banner only
   // states the rule the operator is about to rely on.
-#if KNOB_ENABLED
-  knobUpdate();                 // before anything asks what the knob says
-#endif
-  Serial.print(F("Alarm: baseline +/- ")); Serial.print(knobAlarmPercent(), 1);
+  Serial.print(F("Alarm: baseline +/- ")); Serial.print(selectedAlarmPercent(), 1);
   Serial.print(F(" %, ")); Serial.print(ALARM_BOTH_DIRECTIONS ? F("either way") : F("above only"));
   Serial.print(F(", ")); Serial.print(ALARM_CONFIRM_POINTS); Serial.println(F(" to confirm"));
 #if TEST_MODE
@@ -2765,15 +2716,6 @@ void handlePoint(float mv) {
   lastReadingMv = mv;
 
   if (!recording()) {
-#if KNOB_ENABLED
-    // The knob, idle only.  Here rather than on a timer of its own
-    // because the conversions already arrive ten times a second, and
-    // this is the moment with ~95 ms of slack before the next one.  A
-    // scan has frozen its percentage, so during one there is nothing to
-    // read and the scan path stays exactly as it was bench-proven.  A
-    // knob turned during a scan is reported on the first point after STOP.
-    if (knobUpdate()) printAlarmRule(knobAlarmPercent());
-#endif
     // READY or CALIBRATING: a live reading every 2 s, so the bench
     // operator can see the unit working without starting a scan.
     if (now - lastIdlePrintMs >= IDLE_PRINT_MS) {
@@ -2816,17 +2758,26 @@ void handlePoint(float mv) {
     if (tms >= SETTLE_MS + INITIAL_LEARNING_MS) {
       baselineReady = true;
       initialBaselineMv = baselineMv;   // frozen, for the summary
-      phase = SCANNING;
       Serial.print(F("---- BASELINE ")); printMv(Serial, baselineMv);
       Serial.print(F(" mV from ")); Serial.print(learningPoints);
       Serial.println(F(" readings ----"));
       printAlarmRule(scanPercent);
-      // The operator needs to know when the instrument goes live without
-      // watching it.  Up to here nothing could alarm; from the next
-      // reading on, everything can.  Safe to sound now: the learning
-      // window has closed, so the buzzer cannot disturb the readings
-      // that built the baseline.
-      soundStart(SND_ARMED);
+      // Tell the operator that baseline learning is complete, then let the
+      // ADC recover before the actual scan begins.  This short click and
+      // the three recovery conversions happen before SCANNING, so no
+      // active-scan points are discarded or corrupted by the notification.
+      soundPlayBlocking(SND_CLICK);
+#if !TEST_MODE
+      if (!adsDiscardConversions(3)) {
+        adcOk = false;
+        scanStatus = SCAN_ADC_FAULT;
+        actionStopScan();
+        return;
+      }
+      drdyArmed = false;
+      lastConversionMs = millis();
+#endif
+      phase = SCANNING;
     }
     return;
   }
@@ -2851,11 +2802,21 @@ void handlePoint(float mv) {
   bool alarm;
   if (!abnormal) {
     abnormalRun = 0;
+    abnormalSide = 0;
     alarm       = false;
     scanNormal++;
     baselineAccept(mv);                  // accepted: it enters the window
   } else {
-    if (abnormalRun < 255) abnormalRun++;
+    // A real sustained event remains on one side of the baseline.  The
+    // measured SD-write disturbance is a short high-then-low pair, so an
+    // opposite-side point starts a new candidate instead of confirming it.
+    int8_t side = (mv > high) ? 1 : -1;
+    if (side != abnormalSide) {
+      abnormalSide = side;
+      abnormalRun = 1;
+    } else if (abnormalRun < 255) {
+      abnormalRun++;
+    }
     scanAbnormal++;
     alarm = (abnormalRun >= ALARM_CONFIRM_POINTS);
     // The window is deliberately not touched here.
@@ -2904,6 +2865,7 @@ void loop() {
   handleSerialCommands();
 
   // ---- buttons ----
+  if (buttonWasPressed(btnThreshold)) actionCycleThreshold();
   if (buttonWasPressed(btnStart)) actionStartScan();
   if (buttonWasPressed(btnStop))  actionStopScan();
 }
